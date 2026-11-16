@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at -10% -20%, rgba(59, 130, 246, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 110% -10%, rgba(20, 184, 166, 0.10), transparent 60%),
+    #050a16;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-white/[0.07] bg-ink-900/80 shadow-panel;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/70 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-accent-blue to-accent-teal text-white shadow-glow hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn border border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.07];
+  }
+  .btn-danger {
+    @apply btn border border-rose-500/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20;
+  }
+  .icon-btn {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white/[0.07] hover:text-slate-100
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/70;
+  }
+  .input {
+    @apply w-full rounded-xl border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500
+      focus:border-accent-sky/50 focus:outline-none focus:ring-2 focus:ring-accent-sky/20;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-slate-300;
+  }
+}
+
+/* ---- research document typography ---- */
+.doc {
+  @apply prose prose-invert max-w-none prose-headings:font-semibold prose-headings:text-slate-100 prose-p:leading-7
+    prose-a:text-accent-sky prose-a:no-underline prose-strong:text-slate-100
+    prose-code:rounded prose-code:bg-white/[0.06] prose-code:px-1 prose-code:py-0.5 prose-code:font-mono prose-code:text-[0.85em]
+    prose-code:before:content-none prose-code:after:content-none prose-pre:bg-transparent prose-pre:p-0
+    prose-th:text-slate-200 prose-td:align-top prose-table:text-sm prose-blockquote:border-accent-teal/60 prose-img:rounded-xl;
+}
+.doc table {
+  @apply block overflow-x-auto;
+}
+.doc .katex-display {
+  @apply overflow-x-auto overflow-y-hidden py-1;
+}
+.cite {
+  @apply mx-[1px] inline-flex -translate-y-1 cursor-pointer items-center rounded bg-accent-sky/15 px-1 text-[10px] font-semibold text-accent-sky
+    no-underline hover:bg-accent-sky/30;
+}
+
+/* highlight.js — compact dark palette */
+.hljs { color: #dbe7ff; background: transparent; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #7dd3fc; }
+.hljs-string, .hljs-attr { color: #5eead4; }
+.hljs-number, .hljs-literal { color: #fbbf24; }
+.hljs-comment { color: #64748b; font-style: italic; }
+.hljs-title, .hljs-section, .hljs-function { color: #a5b4fc; }
+.hljs-type, .hljs-class { color: #f0abfc; }
+.hljs-variable, .hljs-params { color: #e2e8f0; }
+
+.scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.18); border-radius: 8px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes pulse-dot { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
+.typing-dot { animation: pulse-dot 1.2s infinite; }
+.typing-dot:nth-child(2) { animation-delay: .2s }
+.typing-dot:nth-child(3) { animation-delay: .4s }

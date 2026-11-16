@@ -1,0 +1,24 @@
+{
+  "created_utc": "2026-11-14T12:27:25.404863+00:00",
+  "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "dataset": "common-pile/arxiv_papers_filtered",
+  "split": "train",
+  "embedding_dimension": 384,
+  "similarity": "cosine (inner product over normalized embeddings)",
+  "faiss_index_type": "IndexFlatIP",
+  "fp16": true,
+  "document_count": 49428,
+  "papers_seen": 500,
+  "documents_file": "documents.jsonl",
+  "offsets_file": "document_offsets.bin",
+  "index_file": "faiss.index",
+  "chunking": {
+    "method": "paragraphs (newline-split) packed into chunks of >= 1200 chars",
+    "oversize_chunks": "split to <= 254 tokens with 32 token overlap"
+  },
+  "notes": [
+    "Vector IDs are sequential and equal the 'id' field in documents.jsonl.",
+    "document_offsets.bin holds one little-endian uint64 byte offset per document ID.",
+    "Embeddings are L2-normalized; inner product == cosine similarity."
+  ]
+}
