@@ -233,7 +233,10 @@ class SkillStore:
                 s.score += 0.25 + 0.05 * min(len(hits), 3)
                 s.reasons.append("keywords: " + ", ".join(hits[:3]))
             if s.name in picks:
-                s.score += 0.30
+                # a planner choice counts strongly, but only with some support in the request itself
+                # (keyword hit or non-trivial similarity) — protects against a confused plan
+                supported = bool(hits) or (qvec is not None and s.score >= 0.12)
+                s.score += 0.40 if supported else 0.10
                 s.reasons.append("chosen by planner")
         ranked = sorted((s for s in skills if s.score >= settings.skills_min_score), key=lambda s: s.score, reverse=True)
         return ranked[:k]

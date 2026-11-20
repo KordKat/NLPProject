@@ -41,7 +41,11 @@ class Settings(BaseSettings):
     llm_model_name: str = "KordAI/KeawGPT"
     llm_load_on_startup: bool = True
     llm_load_in_4bit: bool = True
-    llm_max_context_tokens: int = 16384
+    llm_max_context_tokens: int = 131072  # capped at the model's (YaRN-extended) max positions
+    # YaRN RoPE scaling: factor 4 extends Qwen3's native 32,768 positions to 131,072. 1.0 = off.
+    # Static YaRN slightly degrades very short prompts; KV cache costs ~144 KB/token in bf16
+    # (≈19 GB at 128K), so lower llm_max_context_tokens if the GPU runs out of memory.
+    llm_rope_scaling_factor: float = 4.0
     llm_max_new_tokens: int = 3072
     llm_temperature: float = 0.6
     llm_top_p: float = 0.9
@@ -53,6 +57,7 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_device: str = "cpu"
     arxiv_min_score: float = 0.30
+    arxiv_search_enabled: bool = True  # false = never query the arXiv FAISS index (web + graph only)
     arxiv_overfetch: int = 8
 
     # --- research loop ---

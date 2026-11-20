@@ -43,6 +43,24 @@ def _flash_attn_available() -> bool:
     return importlib.util.find_spec("flash_attn") is not None
 
 
+def apply_yarn(config: Any, factor: float) -> None:
+    """Enable YaRN RoPE scaling on a loaded config: max positions × factor.
+
+    transformers ≥ 5 keeps RoPE settings in `config.rope_parameters` (incl. rope_theta);
+    4.x uses `config.rope_scaling`. Idempotent: a config that already uses YaRN is left alone."""
+    current = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
+    if (current.get("rope_type") or current.get("type")) == "yarn":
+        return
+    native = int(getattr(config, "max_position_embeddings", 32768) or 32768)
+    yarn = {"rope_type": "yarn", "factor": float(factor), "original_max_position_embeddings": native}
+    if getattr(config, "rope_parameters", None) is not None:
+        config.rope_parameters = {**current, **yarn}
+    else:
+        config.rope_scaling = yarn
+    config.max_position_embeddings = int(native * factor)
+    log.info("YaRN RoPE scaling ×%.1f: %d → %d positions", factor, native, config.max_position_embeddings)
+
+
 class KeawEngine:
     def __init__(self, model_name: str):
         self.model_name = model_name
@@ -68,6 +86,10 @@ class KeawEngine:
             self.tokenizer.truncation_side = "left"
 
             config = AutoConfig.from_pretrained(self.model_name)
+            if settings.llm_rope_scaling_factor > 1.0:
+                apply_yarn(config, settings.llm_rope_scaling_factor)
+            # the fine-tune's config ships use_cache=false (training leftover); generation needs the KV cache
+            config.use_cache = True
             model_max = int(getattr(config, "max_position_embeddings", 4096) or 4096)
             self.max_context_len = min(model_max, settings.llm_max_context_tokens)
 
@@ -159,9 +181,12 @@ class KeawEngine:
             if start >= last_user:
                 # nothing left to drop: shrink the system/user content as a last resort
                 if msgs and msgs[0]["role"] == "system" and len(msgs[0]["content"]) > 4000:
+                    # cut from the middle: the rules are at the start and the task guidance at the end
                     over = n - budget
                     sys_c = msgs[0]["content"]
-                    msgs[0] = {"role": "system", "content": sys_c[: max(2000, len(sys_c) - over * 4)]}
+                    keep = max(2000, len(sys_c) - over * 4)
+                    head = keep * 2 // 3
+                    msgs[0] = {"role": "system", "content": sys_c[:head] + "\n…\n" + sys_c[len(sys_c) - (keep - head):]}
                     continue
                 return prompt, n
             del msgs[start]
@@ -219,6 +244,7 @@ class KeawEngine:
             temperature=max(params.temperature, 1e-5),
             top_p=params.top_p,
             pad_token_id=self.tokenizer.pad_token_id,
+            use_cache=True,
             stop_strings=STOP_STRINGS,
             tokenizer=self.tokenizer,
         )

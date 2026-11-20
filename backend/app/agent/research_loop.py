@@ -129,7 +129,8 @@ class ResearchLoop:
                 self.used_queries.add(_norm_query(q))
                 self.out.queries.append({**q, "round": rnd})
             self.out.rounds = rnd
-            label = "Searching scientific papers and knowledge graph" if rnd == 1 else "Performing additional retrieval"
+            sources_label = "scientific papers and knowledge graph" if settings.arxiv_search_enabled else "the web and knowledge graph"
+            label = f"Searching {sources_label}" if rnd == 1 else "Performing additional retrieval"
             await self.step("retrieval", f"{label} (round {rnd}: {len(queries)} queries)", round=rnd, queries=queries)
 
             batch = await run_round(self.ctx, queries, self.question, self.execute, self.seen_keys)
@@ -182,14 +183,18 @@ class ResearchLoop:
     # ------------------------------------------------------------------ helpers
     def _initial_queries(self) -> list[dict[str, str]]:
         qs = [q for q in (self.plan.get("queries") or []) if isinstance(q, dict) and q.get("query")]
+        if not settings.arxiv_search_enabled:
+            qs = [q for q in qs if q.get("tool") != "arxiv"]
         tools = {q.get("tool") for q in qs}
+        from app.agent.orchestrator import keyword_query  # lazy: avoids a circular import
+
         main = self.plan.get("main_question") or self.question
-        if "arxiv" not in tools:
-            qs.append({"tool": "arxiv", "query": main})
+        if "arxiv" not in tools and settings.arxiv_search_enabled:
+            qs.append({"tool": "arxiv", "query": keyword_query(main)})
         if "graph" not in tools:
-            qs.append({"tool": "graph", "query": main})
-        if self.plan.get("needs_current_info") and "web" not in tools:
-            qs.append({"tool": "web", "query": main})
+            qs.append({"tool": "graph", "query": keyword_query(main, 4)})
+        if (not settings.arxiv_search_enabled or self.plan.get("needs_current_info")) and "web" not in tools:
+            qs.append({"tool": "web", "query": keyword_query(main)})
         return qs
 
     def _merge_graph(self, g: dict[str, Any]) -> None:
@@ -266,7 +271,17 @@ class ResearchLoop:
             except (TypeError, ValueError):
                 continue
             c = by_ref.get(ref)
-            if c is None:
+            # small models sometimes attach an extraction to the wrong document number:
+            # trust the title the model wrote and re-attach the item to the document it matches
+            mtitle = _tokens(str(it.get("title", "")))
+            if mtitle:
+                def overlap(cand: dict[str, Any]) -> float:
+                    ct = _tokens(cand.get("title", ""))
+                    return len(mtitle & ct) / max(1, len(mtitle))
+                best = max(batch, key=overlap)
+                if c is None or (overlap(c) < 0.4 and overlap(best) >= 0.6):
+                    c, ref = best, best["ref"]
+            if c is None or ref in results:
                 continue
             source_text = self._doc_text(c)
             ev: dict[str, Any] = {
@@ -358,7 +373,8 @@ class ResearchLoop:
             return {"sufficient": len(self.out.evidence) >= 3, "new_queries": []}
         nq = []
         for q in data.get("new_queries") or []:
-            if isinstance(q, dict) and q.get("query") and q.get("tool") in ("arxiv", "graph", "web"):
+            allowed = ("arxiv", "graph", "web") if settings.arxiv_search_enabled else ("graph", "web")
+            if isinstance(q, dict) and q.get("query") and q.get("tool") in allowed:
                 if _norm_query(q) not in self.used_queries:
                     nq.append({"tool": q["tool"], "query": str(q["query"])[:200]})
         data["new_queries"] = nq[:3]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable
 
+from app.config import get_settings
 from app.knowledge_graph import graph_retriever
 from app.knowledge_graph.neo4j_client import GraphUnavailableError, get_graph
 from app.retrieval.faiss_search import get_arxiv_index
@@ -13,6 +14,7 @@ from app.tools.common import add_source, arxiv_source
 from app.tools.registry import registry
 
 TOOL_FOR = {"arxiv": "search_arxiv", "graph": "search_knowledge_graph", "web": "search_web"}
+settings = get_settings()
 
 Executor = Callable[[str, dict[str, Any]], Awaitable[ToolResult]]
 
@@ -89,7 +91,7 @@ async def run_round(ctx: ToolContext, queries: list[dict[str, str]], question: s
         key = f"arxiv:{gp['paper_id']}"
         if key in seen_keys or any(c["source_key"] == key for c in candidates):
             continue
-        if not index.available:
+        if not index.available or not settings.arxiv_search_enabled:
             continue
         paper = await asyncio.to_thread(index.get_paper, gp["paper_id"])
         if not paper:

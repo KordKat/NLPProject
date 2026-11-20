@@ -25,10 +25,14 @@ TOOL_BLOCK_RE = re.compile(r"<tools?_call>(.*?)(?:</tools?_call>|$)", re.DOTALL)
 FUNCTION_RE = re.compile(r"<function[=:]\s*([A-Za-z0-9_\-\.]+)\s*>(.*?)(?:</function\s*>|(?=<function[=:])|$)", re.DOTALL)
 PARAMETER_RE = re.compile(r"<parameter[=:]\s*([A-Za-z0-9_\-]+)\s*>(.*?)(?:</parameter\s*>|(?=<parameter[=:])|(?=</function)|$)", re.DOTALL)
 
-TOOL_START_MARKERS = ("<tools_call", "<tool_call", "<function=")
+TOOL_START_MARKERS = ("<tools_call", "<tool_call", "<function=", "</tools_call", "</tool_call", "</function", "<parameter=")
+# any tool-protocol tag, opening or closing — never shown to the user
+STRAY_TAG_RE = re.compile(r"</?\s*(?:tools?_call|function|parameter)\b[^>]*>", re.I)
+_PY_CALL_RE = re.compile(r"\b([a-z][a-z0-9_]*)\(\s*((?:[a-z_]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[\w.\-]+)\s*,?\s*)+)\)", re.I)
+_PY_ARG_RE = re.compile(r"([a-z_]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[\w.\-]+)", re.I)
 REASONING_OPEN_RE = re.compile(r"^\s*<(reasoning|think)>", re.DOTALL)
 REASONING_CLOSE_RE = re.compile(r"</(reasoning|think)>")
-_ALL_TAGS = ["<reasoning>", "</reasoning>", "<think>", "</think>", "<tools_call>", "<tool_call>", "<function="]
+_ALL_TAGS = ["<reasoning>", "</reasoning>", "<think>", "</think>", "<tools_call>", "<tool_call>", "<function=", "</tools_call>", "</tool_call>", "</function>", "<parameter=", "</parameter>"]
 _TAG_PREFIXES = {t[:i] for t in _ALL_TAGS for i in range(1, len(t))}
 
 
@@ -117,6 +121,29 @@ def parse_tool_calls(text: str) -> list[ToolCall]:
         if not found:
             calls.extend(_parse_json_body(block))
     return calls
+
+
+def has_stray_tool_markup(text: str) -> bool:
+    return bool(STRAY_TAG_RE.search(text or ""))
+
+
+def strip_tool_markup(text: str) -> str:
+    """Remove leftover protocol tags (e.g. a lone `</tools_call>`) from text shown to the user."""
+    return re.sub(r"[ \t]+\n", "\n", STRAY_TAG_RE.sub("", text or "")).strip()
+
+
+def parse_python_style_calls(text: str, known: set[str]) -> list[ToolCall]:
+    """Recover calls a small model wrote as code, e.g. `use_skill(name="pptx-skill")`, when it
+    forgot the <tools_call> wrapper. Only names of real, offered tools are accepted."""
+    calls: list[ToolCall] = []
+    for m in _PY_CALL_RE.finditer(text or ""):
+        name = m.group(1)
+        if name not in known:
+            continue
+        args = {k: v.strip("\"'") for k, v in _PY_ARG_RE.findall(m.group(2))}
+        if args:
+            calls.append(ToolCall(name=name, arguments=args, raw=m.group(0)))
+    return calls[:2]
 
 
 def coerce_arguments(args: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

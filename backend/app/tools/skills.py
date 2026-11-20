@@ -17,8 +17,13 @@ async def use_skill(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         names = [n for n, _ in await asyncio.to_thread(skill_store.catalog, ctx.user_id, hidden)]
         return ToolResult.failure(f"No skill named '{name}'. Available skills: {', '.join(names) or 'none'}")
     used = ctx.shared.setdefault("skills_used", [])
-    if skill.name not in used:
-        used.append(skill.name)
+    if skill.name in used:
+        # already in the system prompt (RELEVANT SKILLS) or loaded earlier in this run
+        return ToolResult(
+            content=compact_json({"skill": skill.name, "status": "already loaded", "note": "These instructions are already in your context under RELEVANT SKILLS. Do not load them again — continue with the task now (e.g. call run_python)."}),
+            data={"name": skill.name, "already_loaded": True},
+        )
+    used.append(skill.name)
     await ctx.emit({"type": "research_step", "stage": "skills", "text": f"Loaded skill: {skill.title}"})
     return ToolResult(content=compact_json({"skill": skill.name, "title": skill.title, "instructions": skill.body}, 9000), data={"name": skill.name})
 
