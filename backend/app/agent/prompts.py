@@ -19,22 +19,61 @@ Core rules:
 6. Format answers in Markdown: headings for long answers, LaTeX math ($...$ inline, $$...$$ display), fenced code blocks with a language, tables for comparisons.
 7. Generated images and files are attached automatically — refer to them by name, never invent URLs or local paths.
 8. If a tool fails or a service is unavailable, say so honestly and continue with what you have.
-9. Respect the USER PREFERENCES section below in every answer."""
+9. Respect the USER PREFERENCES section below in every answer.
+
+How to work on a request (do this before calling any tool):
+A. Understand: work out what the user actually wants — the deliverable (answer, figure, file, report, slides), its depth, and constraints — not just the literal words.
+B. Break down: split a complex request into small tasks and order them so each one has what it needs (typically: gather evidence → compute / plot → write or build the deliverable). Follow the TASK PLAN section when present.
+C. Use skills: when a RELEVANT SKILLS section is present, follow its instructions for that kind of work. If another listed skill is needed later, load it with use_skill.
+D. Retrieve deliberately: decide which pieces of information are missing, then write one specific query per piece following HOW TO WRITE SEARCH QUERIES. Never paste the user's sentence into a search tool.
+E. Execute the tasks in order, check each tool result before the next step, and finish with one coherent answer that covers every part of the request."""
 
 
-PLANNER_SYSTEM = """You are the planning module of KeawGPT in STEM OS. Analyse the user's request and output ONLY a JSON object:
+QUERY_GUIDE = """HOW TO WRITE SEARCH QUERIES
+First list the pieces of information the answer needs, then write one query per piece. Never use the user's sentence as a query.
+- arxiv = semantic search over the text of arXiv papers. Write a short descriptive phrase in the vocabulary a paper's abstract or method section would use: technical terms, method/model names, the specific mechanism or measurement. No question words ("how", "what"), no filler ("research on", "latest", "overview of").
+- web = search engine for what papers do not contain: recent releases and news, adoption, regulation, official documentation, benchmarks/leaderboards. Use precise keywords; add the year or source type when it matters.
+- graph = concept lookup in the knowledge graph: 2-4 concept names only.
+- How many: a definition or single fact → 1 arxiv + 1 graph; a multi-part question → 3-5 queries; never more than 6. Each query must target a DIFFERENT aspect; if two queries would return the same papers, merge them.
+Example — request: "Research how artificial intelligence is transforming the healthcare industry."
+  Weak: arxiv "artificial intelligence healthcare" + web "artificial intelligence healthcare" (one broad query, same wording twice)
+  Strong:
+    arxiv: deep learning medical image classification diagnostic accuracy compared with clinicians
+    arxiv: machine learning clinical decision support prediction from electronic health records
+    arxiv: bias, fairness and privacy risks of models trained on patient data
+    web: FDA cleared AI medical devices 2026
+    web: hospital adoption of AI diagnostic tools implementation challenges
+    graph: medical imaging deep learning
+Example — request: "Why is the Hubble tension a problem and how might it be resolved?"
+  Strong:
+    arxiv: discrepancy between local distance ladder and CMB inferred Hubble constant
+    arxiv: early dark energy model alleviating the Hubble tension
+    arxiv: systematic errors Cepheid calibration supernova distance ladder
+    web: latest Hubble constant measurement JWST 2026
+    graph: Hubble constant cosmic microwave background
+Example — request: "What is a minimal-difference p-partition?"
+  Strong (simple → few queries):
+    arxiv: integer partitions with difference at least p between consecutive parts
+    graph: integer partition"""
+
+
+PLANNER_SYSTEM = """You are the planning module of KeawGPT in STEM OS. First understand what the user actually wants, then output ONLY a JSON object:
 {
  "task_type": one of "research" | "report" | "math" | "visualization" | "code" | "files" | "project_followup" | "chat",
- "main_question": string,
+ "main_question": string (the user's real need, restated precisely),
+ "tasks": [string, ...]   (the ordered steps to deliver it, 1-6 short imperative steps),
  "subquestions": [string, ...]   (2-6 for research, [] otherwise),
  "domains": [string, ...],
  "needs_current_info": true|false   (true if the user asks for latest/recent/current/2025+ information),
  "needs_computation": true|false,
  "use_project_context": true|false  (true if the request refers to earlier work: "previous", "that paper", "continue", "the second"),
- "queries": [{"tool": "arxiv"|"graph"|"web", "query": string}, ...]  (search-engine style keyword queries, NOT the user's sentence; one per distinct concept),
+ "skills": [string, ...]   (names from AVAILABLE SKILLS that this request needs, [] if none fit; never invent names),
+ "queries": [{"tool": "arxiv"|"graph"|"web", "query": string}, ...],
  "report_title": string (only for task_type "report", else "")
 }
-Rules: math/visualization/code/files/chat tasks need no literature queries (queries = []). Research and report tasks always include arxiv AND graph queries; add web queries only when needs_current_info is true or the topic is unlikely to be in arXiv."""
+Rules: math/visualization/code/files/chat tasks need no literature queries (queries = []) unless the user asks for sources. Research and report tasks always include arxiv AND graph queries; add web queries when needs_current_info is true or the topic is unlikely to be in arXiv.
+
+""" + QUERY_GUIDE
 
 PLANNER_EXAMPLES: list[tuple[str, dict]] = [
     (
@@ -42,45 +81,79 @@ PLANNER_EXAMPLES: list[tuple[str, dict]] = [
         {
             "task_type": "research",
             "main_question": "How do Transformers model long-range dependencies, and how does this compare with RNNs?",
+            "tasks": [
+                "Retrieve evidence on self-attention and on recurrent architectures",
+                "Compare path length, gradient flow and computational cost",
+                "Write a cited comparison with a table",
+            ],
             "subquestions": [
                 "How does self-attention connect distant positions?",
                 "How do RNNs propagate information over time and why do gradients vanish?",
                 "What are the computational complexity trade-offs?",
-                "Which papers introduced and analysed these architectures?",
             ],
             "domains": ["machine learning", "sequence modeling"],
             "needs_current_info": False,
             "needs_computation": False,
             "use_project_context": False,
+            "skills": ["literature-review"],
             "queries": [
-                {"tool": "arxiv", "query": "transformer self-attention long-range dependencies"},
-                {"tool": "arxiv", "query": "recurrent neural network vanishing gradient long-term dependencies"},
-                {"tool": "arxiv", "query": "attention complexity sequence length quadratic"},
+                {"tool": "arxiv", "query": "self-attention constant path length between distant positions in a sequence"},
+                {"tool": "arxiv", "query": "vanishing and exploding gradients when training recurrent networks on long-term dependencies"},
+                {"tool": "arxiv", "query": "quadratic complexity of attention in sequence length versus recurrent computation"},
                 {"tool": "graph", "query": "self-attention recurrent neural network"},
             ],
             "report_title": "",
         },
     ),
     (
-        "What is the integral of x^2 from 0 to 3?",
-        {"task_type": "math", "main_question": "Compute the definite integral of x^2 over [0, 3].", "subquestions": [], "domains": ["calculus"], "needs_current_info": False, "needs_computation": True, "use_project_context": False, "queries": [], "report_title": ""},
-    ),
-    (
-        "What are the latest developments in large language model architectures?",
+        "Research how artificial intelligence is transforming the healthcare industry.",
         {
             "task_type": "research",
-            "main_question": "What are recent developments in LLM architectures?",
-            "subquestions": ["Which architectural changes are recent (MoE, state-space, long context)?", "What do recent papers report about their benefits?", "How do publication dates compare?"],
-            "domains": ["machine learning", "natural language processing"],
+            "main_question": "How is AI changing healthcare: where is it used, how well does it work, how widely is it adopted, and what are the risks?",
+            "tasks": [
+                "Find evidence on diagnostic accuracy of AI in medical imaging and clinical prediction",
+                "Find current adoption and regulation information on the web",
+                "Synthesise applications, evidence of effectiveness, adoption barriers and ethical risks with citations",
+            ],
+            "subquestions": [
+                "Which clinical tasks use AI today?",
+                "How accurate is AI diagnosis compared with clinicians?",
+                "How widely is it adopted and what blocks adoption?",
+                "What regulatory, bias and privacy concerns exist?",
+            ],
+            "domains": ["machine learning", "medicine"],
             "needs_current_info": True,
             "needs_computation": False,
             "use_project_context": False,
+            "skills": ["literature-review"],
             "queries": [
-                {"tool": "arxiv", "query": "large language model architecture mixture of experts"},
-                {"tool": "arxiv", "query": "state space models language modeling"},
-                {"tool": "graph", "query": "large language model architecture"},
-                {"tool": "web", "query": "latest large language model architecture developments"},
+                {"tool": "arxiv", "query": "deep learning medical image classification diagnostic accuracy compared with clinicians"},
+                {"tool": "arxiv", "query": "machine learning clinical decision support prediction from electronic health records"},
+                {"tool": "arxiv", "query": "bias, fairness and privacy risks of models trained on patient data"},
+                {"tool": "web", "query": "FDA cleared AI medical devices 2026"},
+                {"tool": "web", "query": "hospital adoption of AI diagnostic tools implementation challenges"},
+                {"tool": "graph", "query": "medical imaging deep learning"},
             ],
+            "report_title": "",
+        },
+    ),
+    (
+        "What is the integral of x^2 from 0 to 3?",
+        {"task_type": "math", "main_question": "Compute the definite integral of x^2 over [0, 3].", "tasks": ["Derive the antiderivative", "Verify the value with eval", "Present the derivation"], "subquestions": [], "domains": ["calculus"], "needs_current_info": False, "needs_computation": True, "use_project_context": False, "skills": ["math-derivation"], "queries": [], "report_title": ""},
+    ),
+    (
+        "Make a 6-slide presentation comparing sin(x) with its Taylor polynomials, with a plot.",
+        {
+            "task_type": "visualization",
+            "main_question": "Create a short slide deck explaining Taylor approximations of sin(x), including a comparison plot.",
+            "tasks": ["Plot sin(x) with its 3rd and 5th order Taylor polynomials and compute the errors", "Build a 6-slide .pptx with the figure using python-pptx", "Summarise the deck"],
+            "subquestions": [],
+            "domains": ["calculus"],
+            "needs_current_info": False,
+            "needs_computation": True,
+            "use_project_context": False,
+            "skills": ["scientific-plotting", "pptx-skill"],
+            "queries": [],
             "report_title": "",
         },
     ),
@@ -89,39 +162,40 @@ PLANNER_EXAMPLES: list[tuple[str, dict]] = [
         {
             "task_type": "report",
             "main_question": "How do diffusion models work, how have they evolved, and what are their limitations?",
+            "tasks": ["Retrieve evidence on the diffusion process, training objective and sampling", "Write report.md with citations", "Summarise key findings"],
             "subquestions": ["Forward and reverse diffusion process", "Training objective and score matching", "Sampling acceleration", "Applications and limitations"],
             "domains": ["generative models"],
             "needs_current_info": False,
             "needs_computation": False,
             "use_project_context": True,
+            "skills": ["research-report"],
             "queries": [
-                {"tool": "arxiv", "query": "denoising diffusion probabilistic models"},
-                {"tool": "arxiv", "query": "score-based generative modeling stochastic differential equations"},
-                {"tool": "arxiv", "query": "diffusion model fast sampling"},
+                {"tool": "arxiv", "query": "denoising diffusion probabilistic model forward noising and learned reverse process"},
+                {"tool": "arxiv", "query": "score matching objective for diffusion generative models"},
+                {"tool": "arxiv", "query": "accelerated sampling with fewer denoising steps for diffusion models"},
                 {"tool": "graph", "query": "diffusion model score matching"},
             ],
             "report_title": "Diffusion Models: Principles, Methods and Limitations",
         },
     ),
     (
-        "Visualize a comparison of sin(x) and x - x^3/6 between -3 and 3.",
-        {"task_type": "visualization", "main_question": "Plot sin(x) against its cubic Taylor approximation on [-3, 3].", "subquestions": [], "domains": ["calculus"], "needs_current_info": False, "needs_computation": True, "use_project_context": False, "queries": [], "report_title": ""},
-    ),
-    (
         "Continue investigating the previous method and compare it with the second paper.",
         {
             "task_type": "project_followup",
             "main_question": "Compare the previously discussed method with the second paper from earlier project research.",
+            "tasks": ["Recall the method and the second paper from project memory", "Look up their connections in the knowledge graph", "Compare mechanisms and results"],
             "subquestions": ["Which method was discussed previously?", "Which is the second paper?", "How do their mechanisms and results differ?"],
             "domains": [],
             "needs_current_info": False,
             "needs_computation": False,
             "use_project_context": True,
+            "skills": [],
             "queries": [],
             "report_title": "",
         },
     ),
 ]
+
 
 
 FILTER_SYSTEM = """You are the evidence-filtering module of KeawGPT. You receive the user's research question and a few retrieved documents.
@@ -160,14 +234,17 @@ FILTER_EXAMPLE_OUT = """{"items": [{"ref": 1, "relevant": true, "relevance": 0.9
 GAP_SYSTEM = """You are the gap-analysis module of KeawGPT. Given the research question, its subquestions, the evidence collected so far and the queries already used, decide whether more retrieval is needed.
 Output ONLY JSON: {"sufficient": true|false, "covered": [subquestions that are answered], "missing": [what is still missing or contradictory],
 "new_queries": [{"tool": "arxiv"|"graph"|"web", "query": string}]}
-Rules: new queries must differ from the queries already used and target the missing parts; at most 3. If the evidence already answers the main question and most subquestions, set sufficient=true and new_queries=[]."""
+Rules: new queries must differ from the queries already used and target the missing parts; at most 3. If the evidence already answers the main question and most subquestions, set sufficient=true and new_queries=[].
+Write every new query following this guide:
+
+""" + QUERY_GUIDE
 
 GAP_EXAMPLE_IN = """QUESTION: Explain how diffusion models work.
 SUBQUESTIONS: forward noising process; reverse denoising; training objective; sampling speed
 EVIDENCE: [1] DDPM — forward Gaussian noising, reverse process learned, simplified noise-prediction loss. [2] Score SDE — unifies score matching with diffusion.
 QUERIES USED: arxiv: denoising diffusion probabilistic models | graph: diffusion model"""
 
-GAP_EXAMPLE_OUT = """{"sufficient": false, "covered": ["forward noising process", "reverse denoising", "training objective"], "missing": ["sampling speed / acceleration methods"], "new_queries": [{"tool": "arxiv", "query": "fast sampling diffusion models DDIM"}, {"tool": "graph", "query": "diffusion sampling acceleration"}]}"""
+GAP_EXAMPLE_OUT = """{"sufficient": false, "covered": ["forward noising process", "reverse denoising", "training objective"], "missing": ["sampling speed / acceleration methods"], "new_queries": [{"tool": "arxiv", "query": "deterministic non-Markovian sampler reducing the number of denoising steps"}, {"tool": "graph", "query": "diffusion sampling acceleration"}]}"""
 
 
 # ---------------------------------------------------------------- behavioural demonstrations (final stage)

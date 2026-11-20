@@ -54,6 +54,29 @@ def _tokens(s: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]{2,}", s.lower()))
 
 
+_QSTOP = {"the", "and", "for", "with", "from", "into", "that", "this", "what", "how", "why", "are", "does", "about", "latest", "recent", "research", "overview"}
+
+
+def _qtokens(q: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]{3,}", q.lower())) - _QSTOP
+
+
+def dedupe_queries(queries: list[dict[str, Any]], previous: list[dict[str, Any]] | tuple = ()) -> list[dict[str, Any]]:
+    """Drop queries that would retrieve essentially the same material as an earlier query for the
+    same tool (token Jaccard ≥ 0.6), e.g. paraphrases a small model tends to produce."""
+    pool = [(p.get("tool"), _qtokens(p.get("query", ""))) for p in previous]
+    kept: list[dict[str, Any]] = []
+    for q in queries:
+        tk = _qtokens(q.get("query", ""))
+        if not tk:
+            continue
+        if any(tool == q.get("tool") and len(tk & other) / max(1, len(tk | other)) >= 0.6 for tool, other in pool):
+            continue
+        kept.append(q)
+        pool.append((q.get("tool"), tk))
+    return kept
+
+
 def _truthy(v: Any) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("true", "yes", "1", "relevant")
@@ -98,7 +121,7 @@ class ResearchLoop:
             if self.ctx.cancel_event.is_set():
                 self.out.stop_reason = "cancelled"
                 break
-            queries = [q for q in queries if _norm_query(q) not in self.used_queries][:6]
+            queries = dedupe_queries([q for q in queries if _norm_query(q) not in self.used_queries], self.out.queries)[:6]
             if not queries:
                 self.out.stop_reason = "no new queries"
                 break

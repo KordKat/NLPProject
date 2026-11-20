@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agent.model_engine import get_engine
-from app.api import artifacts, assistant, auth, knowledge_graph, preferences, projects
+from app.api import artifacts, assistant, auth, knowledge_graph, preferences, projects, skills
 from app.config import get_settings
 from app.database.session import init_db
 from app.knowledge_graph.neo4j_client import get_graph
@@ -76,7 +76,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (auth.router, preferences.router, projects.router, assistant.router, assistant.tools_router, artifacts.router, knowledge_graph.router):
+for r in (auth.router, preferences.router, projects.router, assistant.router, assistant.tools_router, artifacts.router, knowledge_graph.router, skills.router):
     app.include_router(r)
 
 

@@ -27,6 +27,7 @@ BUILTIN_MODULES = [
     "app.tools.files",
     "app.tools.reports",
     "app.tools.memory",
+    "app.tools.skills",
 ]
 
 

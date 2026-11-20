@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Optional
 from app.agent import context_manager
 from app.agent.model_engine import GenerationCancelled, GenerationParams, ModelUnavailableError, get_engine, strip_turn_markers
 from app.agent.prompts import PLANNER_EXAMPLES, PLANNER_SYSTEM, TOOLS_FOR_TASK
-from app.agent.research_loop import ResearchLoop, evidence_for_storage
+from app.agent.research_loop import ResearchLoop, dedupe_queries, evidence_for_storage
 from app.agent.tool_parser import extract_json, format_tool_call, parse_tool_calls, split_reasoning, visible_answer
 from app.config import get_settings
 from app.database.models import Project, ResearchRun, utcnow
@@ -26,6 +26,7 @@ from app.database.repositories import projects as repo
 from app.database.session import db_session
 from app.services import personalization, project_memory
 from app.services.approvals import approvals
+from app.services.skills import hidden_skills_for, skill_store
 from app.tools.base import ToolContext, ToolResult
 from app.tools.registry import registry
 
@@ -104,20 +105,24 @@ def heuristic_plan(message: str) -> dict[str, Any]:
     return {
         "task_type": task, "main_question": message[:500], "subquestions": [], "domains": [],
         "needs_current_info": recent, "needs_computation": task in ("math", "visualization"),
-        "use_project_context": task == "project_followup", "queries": queries,
+        "use_project_context": task == "project_followup", "queries": queries, "tasks": [], "skills": [],
         "report_title": message[:80] if task == "report" else "", "_source": "heuristic",
     }
 
 
-async def make_plan(message: str, project_text: str, history_hint: str, cancel_event: threading.Event) -> dict[str, Any]:
+EXAMPLE_SKILL_CATALOG = "- literature-review: survey and compare papers\n- math-derivation: step-by-step verified math\n- scientific-plotting: matplotlib figures\n- pptx-skill: PowerPoint decks with python-pptx\n- research-report: formal cited reports"
+
+
+async def make_plan(message: str, project_text: str, history_hint: str, cancel_event: threading.Event, skill_catalog: Optional[list[tuple[str, str]]] = None) -> dict[str, Any]:
+    import json as _json
+
     engine = get_engine()
     msgs = [{"role": "system", "content": PLANNER_SYSTEM}]
     for q, a in PLANNER_EXAMPLES:
-        import json as _json
-
-        msgs.append({"role": "user", "content": q})
+        msgs.append({"role": "user", "content": f"AVAILABLE SKILLS:\n{EXAMPLE_SKILL_CATALOG}\n\nUSER REQUEST:\n{q}"})
         msgs.append({"role": "assistant", "content": _json.dumps(a, ensure_ascii=False)})
-    ctx = f"PROJECT CONTEXT:\n{project_text[:1500]}\n\nRECENT CONVERSATION:\n{history_hint[:1200]}\n\nUSER REQUEST:\n{message}"
+    catalog = "\n".join(f"- {n}: {d[:140]}" for n, d in (skill_catalog or [])) or "(none)"
+    ctx = f"AVAILABLE SKILLS:\n{catalog}\n\nPROJECT CONTEXT:\n{project_text[:1500]}\n\nRECENT CONVERSATION:\n{history_hint[:1200]}\n\nUSER REQUEST:\n{message}"
     msgs.append({"role": "user", "content": ctx})
     try:
         out = await engine.complete(msgs, GenerationParams(max_new_tokens=600, temperature=0.1), cancel_event=cancel_event)
@@ -132,7 +137,10 @@ async def make_plan(message: str, project_text: str, history_hint: str, cancel_e
         return fallback
     plan.setdefault("main_question", message)
     plan["subquestions"] = [str(s) for s in (plan.get("subquestions") or []) if isinstance(s, (str, int))][:6]
-    plan["queries"] = [q for q in (plan.get("queries") or []) if isinstance(q, dict) and q.get("tool") in ("arxiv", "graph", "web") and q.get("query")][:6]
+    plan["queries"] = dedupe_queries([q for q in (plan.get("queries") or []) if isinstance(q, dict) and q.get("tool") in ("arxiv", "graph", "web") and q.get("query")])[:6]
+    plan["tasks"] = [str(s)[:200] for s in (plan.get("tasks") or []) if isinstance(s, (str, int))][:6]
+    valid_skills = {n for n, _ in (skill_catalog or [])}
+    plan["skills"] = [str(s) for s in (plan.get("skills") or []) if isinstance(s, str) and s in valid_skills][:3]
     # the planner must not turn an obviously different task type into chat
     if plan["task_type"] == "chat" and fallback["task_type"] not in ("chat", "research"):
         plan["task_type"] = fallback["task_type"]
@@ -215,7 +223,9 @@ class Orchestrator:
         # ---------------- Stage A: understand + decompose
         await self.emit({"type": "status", "text": "Analyzing question"})
         hist_hint = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history[-4:])
-        plan = await make_plan(self.message, project_text, hist_hint, self.active.cancel_event)
+        hidden_skills = await asyncio.to_thread(hidden_skills_for, self.user_id)
+        skill_catalog = await asyncio.to_thread(skill_store.catalog, self.user_id, hidden_skills)
+        plan = await make_plan(self.message, project_text, hist_hint, self.active.cancel_event, skill_catalog)
         if self.research_mode == "off" and plan["task_type"] in ("research", "report"):
             plan["task_type"] = "chat"
         if self.research_mode == "deep" and plan["task_type"] in ("chat", "project_followup"):
@@ -231,6 +241,13 @@ class Orchestrator:
         await self.emit({"type": "plan", "task_type": task, "main_question": plan.get("main_question"), "subquestions": plan.get("subquestions", []), "needs_current_info": plan.get("needs_current_info", False)})
         await self.emit({"type": "research_step", "stage": "plan", "text": f"Task type: {task}" + (f" · {len(plan.get('subquestions', []))} subquestions" if plan.get("subquestions") else "")})
         await asyncio.to_thread(self._update_run, task_type=task, plan={k: v for k, v in plan.items() if not k.startswith("_")})
+
+        # ---------------- skill retrieval: only the skills relevant to this request are loaded
+        skill_query = f"{self.message}\n{plan.get('main_question') or ''}\n{' '.join(plan.get('tasks') or [])}"
+        skills = await asyncio.to_thread(skill_store.retrieve, self.user_id, skill_query, hidden_skills, plan.get("skills"))
+        self.ctx.shared["skills_used"] = [s.name for s in skills]
+        if skills:
+            await self.emit({"type": "research_step", "stage": "skills", "text": "Using skills: " + ", ".join(s.title for s in skills), "skills": [{"name": s.name, "title": s.title, "why": "; ".join(s.reasons)} for s in skills]})
 
         # ---------------- Stages B–F: research
         evidence_msg: Optional[str] = None
@@ -257,9 +274,18 @@ class Orchestrator:
         tool_names = [t for t in TOOLS_FOR_TASK.get(task, TOOLS_FOR_TASK["chat"]) if registry.get(t)]
         if self.wants_web and "search_web" not in tool_names:
             tool_names.append("search_web")
+        for s in skills:  # tools a retrieved skill relies on (only real, registered tools)
+            for tname in s.tools:
+                if registry.get(tname) and tname not in tool_names:
+                    tool_names.append(tname)
+        if len(skill_catalog) > len(skills) and "use_skill" not in tool_names:
+            tool_names.append("use_skill")
         if self.enabled_tools is not None:
-            tool_names = [t for t in tool_names if t in self.enabled_tools]
-        system = context_manager.build_system_prompt(preferences_text=prefs_text, project_text=project_text, task_type=task, tool_names=tool_names, has_evidence=bool(evidence_msg))
+            tool_names = [t for t in tool_names if t in self.enabled_tools or t == "use_skill"]
+        system = context_manager.build_system_prompt(
+            preferences_text=prefs_text, project_text=project_text, task_type=task, tool_names=tool_names,
+            has_evidence=bool(evidence_msg), tasks=plan.get("tasks"), skills=skills, skill_catalog=skill_catalog,
+        )
         messages: list[dict[str, str]] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_content}]
         if evidence_msg:
             messages.append({"role": "assistant", "content": format_tool_call("research_pipeline", {"question": plan.get("main_question") or self.message})})
@@ -393,6 +419,8 @@ class Orchestrator:
             "sources": [{"ref": s["ref"], "title": s.get("title"), "url": s.get("url"), "kind": s.get("source_type"), "paper_id": s.get("paper_id"), "published": (s.get("meta") or {}).get("published", ""), "authors": (s.get("meta") or {}).get("authors", [])[:4], "via": (s.get("meta") or {}).get("via", "")} for s in sources],
             "artifacts": self.ctx.artifacts,
             "evidence_count": len(self.ctx.evidence),
+            "skills": list(self.ctx.shared.get("skills_used", [])),
+            "tasks": (plan or {}).get("tasks", []),
         }
 
 

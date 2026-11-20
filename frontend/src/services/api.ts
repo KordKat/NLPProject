@@ -9,6 +9,7 @@ import type {
   Project,
   ResearchMode,
   Run,
+  SkillInfo,
   ToolInfo,
   User,
   WorkspaceFile,
@@ -117,6 +118,15 @@ export const api = {
   graphSearch: (id: string, q: string) => request<GraphData & { seeds: string[] }>(`/api/projects/${id}/graph/search?q=${encodeURIComponent(q)}`),
   graphNode: (id: string, uid: string) =>
     request<{ node: GraphNode; neighbors: GraphNode[]; edges: GraphEdge[] }>(`/api/projects/${id}/graph/node?uid=${encodeURIComponent(uid)}`),
+
+  // skills
+  skills: () => request<SkillInfo[]>("/api/skills"),
+  skill: (id: string) => request<SkillInfo & { content: string }>(`/api/skills/${encodeURIComponent(id)}`),
+  addSkill: (body: { name: string; content: string; title?: string; description?: string; triggers?: string[]; tools?: string[]; overwrite?: boolean }) =>
+    request<SkillInfo>("/api/skills", { method: "POST", body: json(body) }),
+  removeSkill: (id: string) => request<{ removed: string; mode: "deleted" | "hidden" }>(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  restoreSkill: (id: string) => request<{ restored: string }>(`/api/skills/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+  matchSkills: (q: string) => request<SkillInfo[]>(`/api/skills/match?q=${encodeURIComponent(q)}`),
 
   // system
   health: () => request<Health>("/api/health"),

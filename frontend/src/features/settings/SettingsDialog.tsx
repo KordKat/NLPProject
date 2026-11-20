@@ -5,8 +5,9 @@ import { Modal, Spinner } from "../../components/ui";
 import { useAuth } from "../../hooks/useAuth";
 import { api } from "../../services/api";
 import type { Health, Preferences } from "../../types";
+import SkillsPanel from "./SkillsPanel";
 
-type Tab = "preferences" | "memory" | "account" | "system";
+type Tab = "preferences" | "memory" | "skills" | "account" | "system";
 
 function ListField({ label, value, onChange, placeholder }: { label: string; value: string[]; onChange: (v: string[]) => void; placeholder: string }) {
   const [draft, setDraft] = useState("");
@@ -101,6 +102,7 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
           {([
             ["preferences", "Personalization"],
             ["memory", "Learned preferences"],
+            ["skills", "Skills"],
             ["account", "Account"],
             ["system", "System status"],
           ] as [Tab, string][]).map(([id, label]) => (
@@ -205,6 +207,8 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
               )}
             </div>
           )}
+
+          {tab === "skills" && <SkillsPanel />}
 
           {tab === "account" && (
             <form onSubmit={saveAccount} className="max-w-md space-y-4">

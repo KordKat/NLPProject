@@ -91,6 +91,8 @@ export interface MessageMeta {
   feedback?: { rating: number; content: string };
   error?: string;
   evidence_count?: number;
+  skills?: string[];
+  tasks?: string[];
 }
 
 export interface Message {
@@ -181,6 +183,20 @@ export interface Health {
   faiss: { status: string; error: string; vectors: number; papers_seen?: number; metadata_sidecar: string; corpus_note: string };
   neo4j: { status: string; error: string };
   sandbox: string;
+}
+
+export interface SkillInfo {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  triggers: string[];
+  tools: string[];
+  source: "builtin" | "user";
+  hidden: boolean;
+  size_bytes: number;
+  score?: number;
+  reasons?: string[];
 }
 
 export interface PendingApproval {

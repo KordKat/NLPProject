@@ -62,8 +62,10 @@ services:
       SANDBOX_MODE: remote
       SANDBOX_URL: http://sandbox:8090
       HF_HOME: /models/hf
+      SKILLS_DIR: /skills
     volumes:
       - ./test_out_st/test_out_st:/data/faiss:ro     # existing FAISS index (reused as-is)
+      - ./skills:/skills:ro                         # built-in skill library (user skills live in /storage/skills)
       - ./storage:/storage                          # projects, artifacts, metadata sidecar
       - hfcache:/models/hf                          # KeawGPT + MiniLM weights
     depends_on:

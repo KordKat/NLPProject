@@ -217,6 +217,7 @@ export default function ProjectWorkspace() {
                       artifacts={m.meta?.artifacts || []}
                       error={m.meta?.status === "failed" ? m.meta?.error : m.meta?.status === "cancelled" ? "Run cancelled." : undefined}
                       feedback={m.meta?.feedback}
+                      skills={m.meta?.skills}
                       onOpenArtifact={(a) => openArtifact(a)}
                       onImage={(src, alt, attribution) => setLightbox({ src, alt, attribution })}
                       onCite={() => setFocusTab({ tab: "papers", n: Date.now() })}

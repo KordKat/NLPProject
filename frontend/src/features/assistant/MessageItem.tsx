@@ -1,6 +1,6 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, Globe, Image as ImageIcon, Network, Paperclip, ThumbsDown, ThumbsUp } from "lucide-react";
+import { AlertTriangle, BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, Globe, Image as ImageIcon, Network, Paperclip, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import { Markdown } from "../../components/Markdown";
 import { Spinner } from "../../components/ui";
 import { api } from "../../services/api";
@@ -156,6 +156,7 @@ interface AnswerProps {
   status?: string;
   error?: string;
   feedback?: { rating: number; content: string };
+  skills?: string[];
   onOpenArtifact: (a: Artifact) => void;
   onImage: (src: string, alt: string, attribution?: string) => void;
   onCite?: (ref: number, sources: SourceRef[]) => void;
@@ -187,6 +188,12 @@ export function AssistantAnswer(p: AnswerProps) {
         </div>
       )}
       <ArtifactStrip artifacts={p.artifacts} onOpen={p.onOpenArtifact} onImage={p.onImage} />
+      {p.skills && p.skills.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <Wand2 size={12} className="text-accent-teal" /> Skills used:
+          {p.skills.map((s) => <span key={s} className="chip font-mono">{s}</span>)}
+        </div>
+      )}
       <SourceList sources={p.sources} highlight={hl} />
       {!p.live && p.text && (
         <div className="flex items-center gap-1 pt-1">

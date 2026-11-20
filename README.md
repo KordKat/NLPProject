@@ -95,6 +95,21 @@ is injected into the prompt. Add a tool by registering a `ToolSpec` in a module 
 `EXTRA_TOOLS_MODULES` — the orchestrator does not change. Destructive / external-effect calls
 (deletes, risky shell commands) pause the run and ask the user for approval in the UI.
 
+### Skills (`skills/`, `backend/app/services/skills.py`)
+Markdown instruction files for specific kinds of work: PowerPoint decks (python-pptx), frontend
+design, scientific plotting, literature reviews, math derivations, data analysis, research reports and
+knowledge-graph curation. For each request the planner picks skills from a one-line catalog, and
+retrieval combines that with MiniLM similarity and trigger keywords. Only the top matches (default 3)
+are injected into the system prompt; the agent can load others with `use_skill`. Users manage
+skills in **Settings → Skills**: add their own (stored in `storage/skills/<user_id>/`), hide or restore
+built-in ones, and test which skills a request would retrieve.
+
+### Query generation
+The planner, the gap-analysis step and the main system prompt share an ICL guide (`QUERY_GUIDE` in
+`prompts.py`) with worked examples. It teaches aspect-specific queries per source: paper-style phrasing
+for the arXiv FAISS index, keyword queries for the web, concept names for the graph. Near-duplicate
+queries are merged before retrieval.
+
 ### FAISS index
 Reused exactly as built (manifest: all-MiniLM-L6-v2, 384-d, normalized, `IndexFlatIP`). Queries use
 the same model with `normalize_embeddings=True`. Titles/abstracts are not in the chunk metadata, so a

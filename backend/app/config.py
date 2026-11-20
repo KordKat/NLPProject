@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     neo4j_password: str = "stemos-neo4j"
     neo4j_database: str = "neo4j"
 
+    # --- skills ---
+    skills_dir: str = "skills"  # built-in skill library (Markdown files)
+    skills_max_per_request: int = 3
+    skills_min_score: float = 0.38
+
     # --- storage ---
     storage_dir: str = "storage"
     max_upload_mb: int = 25
@@ -104,6 +109,14 @@ class Settings(BaseSettings):
     @property
     def projects_path(self) -> Path:
         return self.storage_path / "projects"
+
+    @property
+    def skills_path(self) -> Path:
+        return _resolve(self.skills_dir)
+
+    @property
+    def user_skills_path(self) -> Path:
+        return self.storage_path / "skills"
 
     @property
     def cache_path(self) -> Path:

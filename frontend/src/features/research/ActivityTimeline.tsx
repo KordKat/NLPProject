@@ -1,6 +1,6 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, Filter, GitBranch, Globe, Network, Search, ShieldAlert, Sparkles, Wrench, XCircle } from "lucide-react";
+import { BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, Filter, GitBranch, Globe, Network, Search, ShieldAlert, Sparkles, Wand2, Wrench, XCircle } from "lucide-react";
 import type { ActivityEvent } from "../../types";
 import { TypingDots } from "../../components/ui";
 
@@ -13,6 +13,7 @@ const STAGE_ICON: Record<string, typeof Search> = {
   gap: Sparkles,
   synthesis: BookOpen,
   report: BookOpen,
+  skills: Wand2,
   done: CheckCircle2,
 };
 
@@ -22,6 +23,7 @@ const TOOL_ICON: Record<string, typeof Search> = {
   search_images: Globe,
   search_knowledge_graph: Network,
   upsert_knowledge_graph: Network,
+  use_skill: Wand2,
 };
 
 function argSummary(args?: Record<string, unknown>): string {
