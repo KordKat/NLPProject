@@ -52,6 +52,13 @@ npm install
 npm run dev                                           # http://localhost:5173 (proxies /api → :8000)
 ```
 
+### Remote GPU host (RunPod)
+After installing the backend and frontend dependencies on the pod, run `bash start.sh` from the repo
+root. It starts both servers on all interfaces, which RunPod's HTTPS proxy needs. Then open
+`https://<pod-id>-5173.proxy.runpod.net/`; the backend is at `https://<pod-id>-8000.proxy.runpod.net/`.
+Expose ports 5173 and 8000 as HTTP ports in the pod settings. A 502 from those addresses means
+nothing is listening on the port yet.
+
 Notes
 * No Postgres at hand? `DATABASE_URL=sqlite:///./stemos.db` works for a single-user trial.
 * `SANDBOX_MODE=local` runs bash/Python as a confined subprocess in the project workspace (scrubbed
