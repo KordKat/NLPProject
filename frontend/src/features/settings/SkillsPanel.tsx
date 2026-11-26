@@ -198,7 +198,7 @@ export default function SkillsPanel() {
             <div>
               <span className="label">Tools the skill uses</span>
               <div className="flex flex-wrap gap-1.5">
-                {tools.filter((t) => t.name !== "use_skill").map((t) => (
+                {tools.map((t) => (
                   <button
                     type="button"
                     key={t.name}

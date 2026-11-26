@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from bs4 import BeautifulSoup
 
 from app.services.artifact_storage import resolve_in_workspace
-from app.services.safe_fetch import UnsafeURLError, safe_get, safe_post_form
+from app.services.safe_fetch import UnsafeURLError, read_public_page, safe_get, safe_post_form
 from app.tools.base import ToolContext, ToolResult, ToolSpec
 from app.tools.common import add_source, register_file_artifact, web_source
 from app.tools.registry import compact_json, registry
@@ -96,10 +96,42 @@ def ddg_instant_answer(query: str, limit: int) -> list[dict[str, Any]]:
     return results[:limit]
 
 
-def fetch_page_text(url: str, max_chars: int = 1800) -> tuple[str, str]:
-    """Returns (text, error)."""
+EXCERPT_CHARS = 1800
+
+
+def _tidy(text: str) -> str:
+    """get_text(" ") puts a space around every inline tag: "LSTM , while ( RNN )"."""
+    text = re.sub(r"\s+", " ", text.replace("​", "")).strip()
+    return re.sub(r"\(\s+", "(", re.sub(r"\s+([,.;:!?)])", r"\1", text))
+
+
+def _drop_duplicate_markup(soup: Any) -> None:
+    """Equations carry a hidden second copy, and reference marks are not part of the sentence.
+    The <math> element itself stays: on many sites it is the only copy of a symbol such as "CP"."""
+    for tag in soup.select("annotation, annotation-xml, .katex-mathml, sup.reference"):
+        if not tag.decomposed:
+            tag.decompose()
+
+
+def _prose_blocks(root: Any) -> list[str]:
+    """Paragraphs and full-sentence list items. Headings, menus and link lists are left out."""
+    blocks: list[str] = []
+    for el in root.find_all(["p", "li", "blockquote", "dd"]):
+        if el.find(["p", "li"]):  # a container: its inner blocks are read on their own
+            continue
+        text = _tidy(el.get_text(" ", strip=True))
+        if len(text) < 60 or text[-1] not in ".!?":
+            continue
+        if sum(len(a.get_text(strip=True)) for a in el.find_all("a")) > len(text) / 2:
+            continue
+        blocks.append(text)
+    return list(dict.fromkeys(blocks))
+
+
+def fetch_page_text(url: str, max_chars: int = 24_000) -> tuple[str, str]:
+    """Returns (text, error). The text is the page's prose, one block per line."""
     try:
-        res = safe_get(url, max_bytes=1_500_000)
+        res = read_public_page(url, max_bytes=1_500_000)
     except UnsafeURLError as exc:
         return "", f"blocked: {exc}"
     except Exception as exc:
@@ -111,9 +143,16 @@ def fetch_page_text(url: str, max_chars: int = 1800) -> tuple[str, str]:
     soup = BeautifulSoup(res.content, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg"]):
         tag.decompose()
+    _drop_duplicate_markup(soup)
+    roots = [soup.find("article"), soup.find("main"), soup.find(attrs={"role": "main"}), soup.find(id="mw-content-text"), soup.body, soup]
+    for root in roots:
+        if root is None:
+            continue
+        blocks = _prose_blocks(root)
+        if sum(map(len, blocks)) >= 400:  # a real body, not a teaser card
+            return "\n".join(blocks)[:max_chars], ""
     main = soup.find("article") or soup.find("main") or soup.body or soup
-    text = re.sub(r"\s+", " ", main.get_text(" ", strip=True))
-    return (text[:max_chars] + (" …" if len(text) > max_chars else "")), ""
+    return _tidy(main.get_text(" ", strip=True))[:EXCERPT_CHARS], ""
 
 
 async def search_web(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -148,7 +187,7 @@ async def search_web(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         r["ref"] = src["ref"]
         item = {"ref": src["ref"], "title": r["title"], "url": r["url"], "snippet": r["snippet"]}
         if r.get("fetched"):
-            item["page_excerpt"] = r["content"]
+            item["page_excerpt"] = r["content"][:EXCERPT_CHARS]
         else:
             item["note"] = "Only the search snippet is available (page not fetched/verified)."
         view.append(item)

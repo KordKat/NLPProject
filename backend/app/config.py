@@ -61,9 +61,7 @@ class Settings(BaseSettings):
     arxiv_overfetch: int = 8
 
     # --- research loop ---
-    research_max_rounds: int = 5
-    research_min_new_evidence: int = 1
-    research_sources_per_filter_call: int = 3
+    research_max_rounds: int = 3  # Deep research mode; Auto uses at most 2, Quick uses 1
 
     # --- neo4j ---
     neo4j_uri: str = "bolt://localhost:7687"
@@ -89,7 +87,6 @@ class Settings(BaseSettings):
     sandbox_memory_mb: int = 1024
 
     # --- web ---
-    web_search_always: bool = True  # run a web search for every question (not only when the planner asks for it)
     web_user_agent: str = "Mozilla/5.0 (compatible; STEM-OS-Research/1.0)"
     web_max_bytes: int = 2_000_000
     web_timeout: float = 12.0

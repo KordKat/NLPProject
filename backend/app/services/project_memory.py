@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from app.agent.model_engine import GenerationParams, get_engine
-from app.agent.tool_parser import extract_json
+from app.agent.prompts import MEMORY_SYSTEM
 from app.database.models import Project
 from app.database.repositories import projects as repo
 from app.database.session import db_session
@@ -58,7 +58,7 @@ def recall(project_id: str, query: str) -> dict[str, Any]:
                     evidence.append({k: ev.get(k) for k in ("title", "paper_id", "source_key", "core_concept", "method", "findings", "limitations") if ev.get(k)})
         return {
             "summary": project.summary or "",
-            "past_questions": [r.user_question for r in reversed(runs)][-8:],
+            "past_questions": [r.user_question[:160] for r in reversed(runs)][-8:],
             "sources": [{**s, "ref": i + 1} for i, s in enumerate(listing)],
             "evidence": evidence[:10],
             "decisions": (project.context or {}).get("decisions", [])[-10:],
@@ -66,36 +66,18 @@ def recall(project_id: str, query: str) -> dict[str, Any]:
         }
 
 
-def project_context_text(project: Project, max_sources: int = 12) -> str:
-    """Compact project context for the system prompt (never the whole history)."""
-    lines = [f"Project title: {project.title}"]
+def project_line(project: Project) -> str:
+    """The little the Answer agent must know about the project."""
+    parts = []
     if project.description:
-        lines.append(f"Project description: {project.description[:600]}")
+        parts.append(f"Project focus: {project.description[:240]}")
     if project.summary:
-        lines.append(f"Project memory summary: {project.summary[:1800]}")
-    ctx = project.context or {}
-    if ctx.get("decisions"):
-        lines.append("Key decisions: " + "; ".join(ctx["decisions"][-6:]))
-    if ctx.get("concepts"):
-        lines.append("Saved concepts: " + ", ".join(ctx["concepts"][-20:]))
-    with db_session() as db:
-        srcs = sorted(repo.list_sources(db, project.id), key=lambda s: s.created_at)
-    if srcs:
-        lines.append("Papers/sources already gathered in this project (chronological):")
-        for i, s in enumerate(srcs[:max_sources], 1):
-            tag = f"arXiv:{s.paper_id}" if s.paper_id else s.source_url[:80]
-            lines.append(f"  {i}. {s.title[:110]} ({tag})")
-    return "\n".join(lines)
-
-
-SUMMARY_PROMPT = """You maintain the long-term memory of a research project.
-Update the project summary given the previous summary and the latest exchange.
-Return ONLY JSON: {"summary": "<= 180 words, factual, what is being investigated, key findings, papers discussed>",
-"decisions": ["important decisions or user requirements stated in this exchange (0-3 items)"],
-"concepts": ["key scientific concepts discussed (0-8 items)"]}"""
+        parts.append(f"Project memory: {project.summary[:600]}")
+    return " ".join(parts)
 
 
 async def update_summary(project_id: str, question: str, answer: str) -> None:
+    """Rolling project memory: one rewritten paragraph."""
     engine = get_engine()
     if not engine.available:
         return
@@ -107,25 +89,18 @@ async def update_summary(project_id: str, question: str, answer: str) -> None:
     try:
         out = await engine.complete(
             [
-                {"role": "system", "content": SUMMARY_PROMPT},
-                {"role": "user", "content": f"PREVIOUS SUMMARY:\n{prev}\n\nLATEST QUESTION:\n{question[:1500]}\n\nLATEST ANSWER:\n{answer[:3000]}"},
+                {"role": "system", "content": MEMORY_SYSTEM},
+                {"role": "user", "content": f"MEMORY:\n{prev}\n\nNEW REQUEST:\n{question[:500]}\n\nNEW RESULT:\n{answer[:1500]}"},
             ],
-            GenerationParams(max_new_tokens=500, temperature=0.2),
+            GenerationParams(max_new_tokens=150, temperature=0.1),
         )
-        data = extract_json(out) or {}
     except Exception as exc:
         log.warning("summary update failed: %s", exc)
         return
-    if not isinstance(data, dict) or not data.get("summary"):
+    paragraph = re.sub(r"\s*\[\d+\]", "", out.split("\n\n")[0]).strip()
+    if len(paragraph) < 20:
         return
     with db_session() as db:
         project = db.get(Project, project_id)
-        if project is None:
-            return
-        project.summary = str(data["summary"])[:2500]
-        ctx = dict(project.context or {})
-        for key in ("decisions", "concepts"):
-            items = [str(x)[:200] for x in (data.get(key) or []) if isinstance(x, (str, int, float))]
-            merged = list(dict.fromkeys((ctx.get(key) or []) + items))
-            ctx[key] = merged[-40:]
-        project.context = ctx
+        if project is not None:
+            project.summary = paragraph[:1200]

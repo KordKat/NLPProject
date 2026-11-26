@@ -16,6 +16,8 @@ from urllib.parse import urljoin, urlparse
 # import requests
 from curl_cffi import requests
 
+import requests as plain_requests
+
 from app.config import get_settings
 
 settings = get_settings()
@@ -119,6 +121,38 @@ def safe_get(
                 content=bytes(buf),
                 truncated=truncated,
             )
+    raise UnsafeURLError("Too many redirects")
+
+
+def read_public_page(url: str, *, max_bytes: Optional[int] = None, timeout: Optional[float] = None, max_redirects: int = 4) -> FetchResult:
+    """Reads a page as an identified client (`web_user_agent`), with every redirect hop re-validated.
+    A site that refuses this client stays refused: the caller falls back to the search snippet."""
+    max_bytes = max_bytes or settings.web_max_bytes
+    timeout = timeout or settings.web_timeout
+    headers = {"User-Agent": settings.web_user_agent, "Accept-Language": "en-US,en;q=0.8"}
+    current = url
+    for _ in range(max_redirects + 1):
+        validate_url(current)
+        with plain_requests.get(current, headers=headers, timeout=timeout, stream=True, allow_redirects=False) as r:
+            if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+                location = r.headers.get("location")
+                if not location:
+                    raise UnsafeURLError("Redirect without location")
+                current = urljoin(current, location)
+                continue
+            declared = r.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > max_bytes * 4:
+                raise UnsafeURLError(f"Response too large ({declared} bytes)")
+            body = bytearray()
+            truncated = False
+            for chunk in r.iter_content(chunk_size=16384):
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    truncated = True
+                    del body[max_bytes:]
+                    break
+            content_type = r.headers.get("content-type", "").split(";")[0].strip().lower()
+            return FetchResult(url=current, status=r.status_code, content_type=content_type, content=bytes(body), truncated=truncated)
     raise UnsafeURLError("Too many redirects")
 
 

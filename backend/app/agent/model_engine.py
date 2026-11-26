@@ -37,6 +37,7 @@ class GenerationParams:
     temperature: float = 0.6
     top_p: float = 0.9
     enable_reasoning: bool = False
+    stop: tuple[str, ...] = ()  # extra stop strings for this call
 
 
 def _flash_attn_available() -> bool:
@@ -241,13 +242,13 @@ class KeawEngine:
             **inputs,
             max_new_tokens=max_new,
             do_sample=params.temperature > 0,
-            temperature=max(params.temperature, 1e-5),
-            top_p=params.top_p,
             pad_token_id=self.tokenizer.pad_token_id,
             use_cache=True,
-            stop_strings=STOP_STRINGS,
+            stop_strings=STOP_STRINGS + list(params.stop),
             tokenizer=self.tokenizer,
         )
+        if params.temperature > 0:
+            gen_kwargs.update(temperature=params.temperature, top_p=params.top_p)
 
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -293,16 +294,47 @@ class KeawEngine:
         params: Optional[GenerationParams] = None,
         tools: Optional[list[dict]] = None,
         cancel_event: Optional[threading.Event] = None,
+        prefill: str = "",
     ) -> str:
-        """Non-streaming helper: returns the final answer text (reasoning removed)."""
+        """Non-streaming helper: returns the final answer text (reasoning removed).
+
+        `prefill` starts the model's reply. KeawGPT rarely emits a tool call with reasoning off, but
+        reliably completes one that is already started, so sub-agents prefill `<tools_call>…`."""
         params = params or GenerationParams(max_new_tokens=1024, temperature=0.2, enable_reasoning=False)
         prompt, _ = self.fit_prompt(messages, tools, params.enable_reasoning, params.max_new_tokens)
-        raw = ""
-        async for delta in self.stream(prompt, params, cancel_event):
+        raw = prefill
+        async for delta in self.stream(prompt + prefill, params, cancel_event):
             raw += delta
         raw = strip_turn_markers(raw)
         _, answer = split_reasoning(raw, final=True)
         return answer.strip()
+
+    async def choose(
+        self,
+        messages: list[dict[str, str]],
+        options: list[str],
+        tools: Optional[list[dict]] = None,
+        prefill: str = "",
+    ) -> dict[str, float]:
+        """Constrained decision in ONE forward pass: probability of each option as the next token
+        after `prefill` (about 0.3 s, versus several seconds to generate a tool call)."""
+        if not self.available:
+            raise ModelUnavailableError(f"KeawGPT is not available (status={self.status}). {self.error}")
+        prompt, _ = self.fit_prompt(messages, tools, False, 16)
+        ids = {o: self.tokenizer(o, add_special_tokens=False).input_ids[0] for o in options}
+        if len(set(ids.values())) != len(options):
+            raise ValueError(f"options must start with distinct tokens: {options}")
+
+        def _run() -> dict[str, float]:
+            import torch
+
+            with self._lock, torch.inference_mode():
+                x = self.tokenizer(prompt + prefill, return_tensors="pt", add_special_tokens=False).to(self.model.device)
+                logits = self.model(**x, use_cache=False, logits_to_keep=1).logits[0, -1].float()
+                picked = torch.softmax(logits[list(ids.values())], dim=-1).tolist()
+            return dict(zip(ids, picked))
+
+        return await asyncio.to_thread(_run)
 
 
 def strip_turn_markers(raw: str) -> str:

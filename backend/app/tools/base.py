@@ -67,5 +67,6 @@ class ToolSpec:
                 "name": self.name,
                 "description": self.description,
                 "parameters": {**self.parameters, "type": "object", "title": "parameters"},
+                "strict": True,
             },
         }

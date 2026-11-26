@@ -34,15 +34,20 @@ DEPTH_HINTS = {
 def preferences_text(user_id: str, project: Optional[Project] = None) -> str:
     with db_session() as db:
         p = users_repo.get_or_create_preferences(db, user_id)
+        # only what differs from the defaults: unchanged settings tell the model nothing
         lines = [
-            f"- Language: respond in {p.preferred_language}.",
-            f"- Writing style: {p.response_style}.",
-            f"- Explanation depth: {p.explanation_depth}.",
-            f"- Orientation: {p.theory_vs_practice} (theoretical vs practical).",
-            f"- Math notation: {p.math_notation}. Units: {p.units}. Citation style: {p.citation_style}.",
+            text
+            for value, default, text in (
+                (p.preferred_language, "English", f"- Respond in {p.preferred_language}."),
+                (p.response_style, "academic", f"- Writing style: {p.response_style}."),
+                (p.explanation_depth, "balanced", f"- Explanation depth: {p.explanation_depth}."),
+                (p.theory_vs_practice, "balanced", f"- Orientation: {p.theory_vs_practice}."),
+                (p.math_notation, "LaTeX", f"- Math notation: {p.math_notation}."),
+                (p.units, "SI", f"- Units: {p.units}."),
+                (p.citation_style, "numeric", f"- Citation style: {p.citation_style}."),
+            )
+            if value != default
         ]
-        if p.preferred_topics:
-            lines.append(f"- Fields of interest: {', '.join(p.preferred_topics[:12])}.")
         if p.likes:
             lines.append(f"- Likes: {'; '.join(p.likes[:10])}.")
         if p.dislikes:

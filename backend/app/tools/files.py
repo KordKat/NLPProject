@@ -92,14 +92,14 @@ async def read_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if full.suffix.lower() not in TEXT_EXT and not guess_mime(rel).startswith("text/"):
         if full.suffix.lower() == ".pdf":
             text = await asyncio.to_thread(_pdf_text, full)
-            return ToolResult(content=compact_json({**meta, "content": text}, 12000), data=meta)
+            return ToolResult(content=compact_json({**meta, "content": text}, 12000), data={**meta, "content": text})
         return ToolResult(content=compact_json({**meta, "content": None, "note": "Binary file; content not shown."}), data=meta)
     limit = settings.max_file_read_bytes
     offset = int(args.get("offset", 0) or 0)
     raw = await asyncio.to_thread(full.read_bytes)
     chunk = raw[offset: offset + limit].decode("utf-8", "replace")
     meta["truncated"] = offset + limit < len(raw)
-    return ToolResult(content=compact_json({**meta, "content": chunk}, limit + 1000), data=meta)
+    return ToolResult(content=compact_json({**meta, "content": chunk}, limit + 1000), data={**meta, "content": chunk})
 
 
 def _pdf_text(path: Path) -> str:

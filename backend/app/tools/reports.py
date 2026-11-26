@@ -44,7 +44,7 @@ async def generate_report(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         evidence = [e for e in ctx.evidence if e.get("relevant", True)]
         sources = sorted(ctx.sources.values(), key=lambda s: s["ref"])
         used = {e.get("ref") for e in evidence}
-        sources = [s for s in sources if s["ref"] in used or s["source_type"] in ("arxiv", "web")]
+        sources = [s for s in sources if s["ref"] in used]
     else:
         evidence, sources = await asyncio.to_thread(_project_evidence, ctx.project_id)
     if not evidence and not sources:

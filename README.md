@@ -73,18 +73,24 @@ Notes
   handles multiple calls, missing closing tags and tags split across streamed tokens.
 * Private reasoning is never streamed to the browser; the UI shows research activity instead.
 
-### Research loop (`backend/app/agent/orchestrator.py`, `research_loop.py`)
-A. **Plan** — KeawGPT planner call (JSON contract + few-shot) → task type, subquestions, queries.
-B/C. **Retrieve** — arXiv (FAISS) + Neo4j + optional web, in parallel; vector hits are expanded
-through the graph to find connected papers (hybrid ranking: vector, graph, lexical, source quality,
-recency).
-D. **Filter** — separate KeawGPT call per batch extracts problem / method / mechanisms / equations /
-results / limitations with source refs; ungrounded equations and relations are dropped.
-E. **Augment** — evidence base grows; concepts + typed relations are written to Neo4j with provenance.
-F. **Gap analysis** — KeawGPT decides whether to search again; stops on sufficiency, no new queries,
-diminishing returns or `RESEARCH_MAX_ROUNDS` (default 5).
-G. **Synthesis** — streamed tool-calling loop with the evidence injected as a tool result; citations
-`[n]` map to real sources.
+### Main agent and sub-agents (`backend/app/agent/`)
+The main agent (`orchestrator.py`, `router.py`) does no work itself. It decides which sub-agent runs
+next and moves data between them on a shared blackboard (`runtime.py`).
+
+* **Routing** has two tiers. Explicit signals (a plot, a file, recent facts, earlier work) give the
+  agent order with no model call. Anything else is one KeawGPT forward pass (about 0.3 s) that reads
+  the next-token probabilities of a prefilled tool call. Search runs only when a tier decides it is
+  needed, so well-known concepts are answered directly.
+* **Research** writes queries from few-shot examples, retrieves, selects facts by embedding, and
+  searches again only for uncovered queries (`RESEARCH_MAX_ROUNDS`, default 3).
+* **Compute** runs real code for math, data and plots. **Build** creates slides, reports and files.
+  **Recall** reads project memory. **Answer** is the only agent that talks to the user.
+* **Graph Curator** runs in the background after the answer and writes only relations whose two
+  concepts appear together in one retrieved fact.
+
+### Evidence and citations (`backend/app/retrieval/evidence.py`)
+KeawGPT rewrites the selected facts into one paragraph without source labels. Code then matches each
+sentence to its source, attaches `[n]`, and drops sentences that are unsupported or change a number.
 
 ### Tools (`backend/app/tools/`)
 `search_arxiv`, `search_web`, `search_images`, `search_knowledge_graph`, `upsert_knowledge_graph`,
@@ -98,17 +104,15 @@ is injected into the prompt. Add a tool by registering a `ToolSpec` in a module 
 ### Skills (`skills/`, `backend/app/services/skills.py`)
 Markdown instruction files for specific kinds of work: PowerPoint decks (python-pptx), frontend
 design, scientific plotting, literature reviews, math derivations, data analysis, research reports and
-knowledge-graph curation. For each request the planner picks skills from a one-line catalog, and
-retrieval combines that with MiniLM similarity and trigger keywords. Only the top matches (default 3)
-are injected into the system prompt; the agent can load others with `use_skill`. Users manage
-skills in **Settings → Skills**: add their own (stored in `storage/skills/<user_id>/`), hide or restore
-built-in ones, and test which skills a request would retrieve.
+knowledge-graph curation. Retrieval combines MiniLM similarity with trigger keywords, and a sub-agent
+receives only the best match for its task. Users manage skills in **Settings → Skills**: add their
+own (stored in `storage/skills/<user_id>/`), hide or restore built-in ones, and test which skills a
+request would retrieve.
 
-### Query generation
-The planner, the gap-analysis step and the main system prompt share an ICL guide (`QUERY_GUIDE` in
-`prompts.py`) with worked examples. It teaches aspect-specific queries per source: paper-style phrasing
-for the arXiv FAISS index, keyword queries for the web, concept names for the graph. Near-duplicate
-queries are merged before retrieval.
+### Prompts and in-context examples (`backend/app/agent/prompts.py`)
+Each agent's prompt states only what that agent must know. Fixed output formats use few-shot examples
+as real conversation turns, and decisions use GOOD/BAD contrast lines. Tool calls are prefilled
+because KeawGPT rarely starts one with reasoning off but reliably completes one that has begun.
 
 ### FAISS index
 Reused exactly as built (manifest: all-MiniLM-L6-v2, 384-d, normalized, `IndexFlatIP`). Queries use

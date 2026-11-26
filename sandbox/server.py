@@ -60,7 +60,7 @@ def run(req: RunRequest, x_sandbox_token: str = Header(default="")):
     if req.kind == "python":
         script = Path(tempfile.gettempdir()) / f"run_{uuid.uuid4().hex}.py"
         script.write_text(req.payload, encoding="utf-8")
-        argv = ["python", "-I", str(script)]
+        argv = ["python", "-X", "utf8", "-I", str(script)]
     else:
         argv = ["/bin/bash", "-c", req.payload]
     try:

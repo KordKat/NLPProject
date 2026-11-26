@@ -1,11 +1,13 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, Filter, GitBranch, Globe, Network, Search, ShieldAlert, Sparkles, Wand2, Wrench, XCircle } from "lucide-react";
+import { BookOpen, Bot, Brain, CheckCircle2, ChevronDown, ChevronRight, Filter, GitBranch, Globe, Network, Search, ShieldAlert, ShieldCheck, Sparkles, Wand2, Wrench, XCircle } from "lucide-react";
 import type { ActivityEvent } from "../../types";
 import { TypingDots } from "../../components/ui";
 
 const STAGE_ICON: Record<string, typeof Search> = {
   plan: Brain,
+  agent: Bot,
+  verify: ShieldCheck,
   retrieval: Search,
   graph: Network,
   filter: Filter,
@@ -23,7 +25,6 @@ const TOOL_ICON: Record<string, typeof Search> = {
   search_images: Globe,
   search_knowledge_graph: Network,
   upsert_knowledge_graph: Network,
-  use_skill: Wand2,
 };
 
 function argSummary(args?: Record<string, unknown>): string {
@@ -46,7 +47,7 @@ export default function ActivityTimeline({ events, live = false, status, default
     <div className="rounded-xl border border-white/[0.07] bg-ink-950/50">
       <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-400 hover:text-slate-200" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <span className="font-medium text-slate-300">Research activity</span>
+        <span className="font-medium text-slate-300">Agent activity</span>
         <span>· {tools} tool call{tools === 1 ? "" : "s"}{papers ? ` · ${papers} paper searches` : ""}</span>
         <span className="flex-1" />
         {live && (

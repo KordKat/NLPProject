@@ -129,7 +129,7 @@ async def run_python(project_id: str, code: str, timeout: int | None = None) -> 
     script = script_dir / f"run_{os.getpid()}_{abs(hash(code)) % 10**8}.py"
     script.write_text(code, encoding="utf-8")
     try:
-        return await asyncio.to_thread(_local_run, [sys.executable, "-I", str(script)], ws, timeout)
+        return await asyncio.to_thread(_local_run, [sys.executable, "-X", "utf8", "-I", str(script)], ws, timeout)
     finally:
         try:
             script.unlink()
