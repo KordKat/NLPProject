@@ -11,6 +11,7 @@ Two modes:
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import shutil
 import subprocess
@@ -63,17 +64,43 @@ def _scrubbed_env(cwd: Path) -> dict[str, str]:
     for key in ("PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "PATHEXT"):
         if key in os.environ:
             env[key] = os.environ[key]
+    # numeric libraries start one thread per core and reserve memory for each: on a 256-core server
+    # that alone exceeds the memory limit ("OpenBLAS: Memory allocation still failed")
+    for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        env[key] = _MATH_THREADS
     return env
 
 
-def _posix_limits():  # pragma: no cover - POSIX only
+_MATH_THREADS = str(min(4, os.cpu_count() or 1))
+_CHILD_TASKS = 256  # processes and threads the code itself may start
+
+
+def _user_tasks() -> int:
+    """Threads already running as this user. RLIMIT_NPROC counts all of them, not only the child's,
+    so a fixed limit fails when the server itself (e.g. as root in a container) runs hundreds."""
+    uid, count = os.getuid(), 0
+    try:
+        entries = list(os.scandir("/proc"))
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.name.isdigit():
+            try:
+                if entry.stat().st_uid == uid:
+                    count += len(os.listdir(f"/proc/{entry.name}/task"))
+            except OSError:
+                pass
+    return count
+
+
+def _posix_limits(max_tasks: int):  # pragma: no cover - POSIX only
     import resource
 
     mem = settings.sandbox_memory_mb * 1024 * 1024
     resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
     resource.setrlimit(resource.RLIMIT_CPU, (settings.sandbox_timeout, settings.sandbox_timeout + 5))
     resource.setrlimit(resource.RLIMIT_FSIZE, (200 * 1024 * 1024, 200 * 1024 * 1024))
-    resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
+    resource.setrlimit(resource.RLIMIT_NPROC, (max_tasks, max_tasks))
     os.setsid()
 
 
@@ -81,7 +108,7 @@ def _local_run(argv: list[str], cwd: Path, timeout: int) -> ExecResult:
     (cwd / ".stemos" / "mpl").mkdir(parents=True, exist_ok=True)
     kwargs: dict = dict(cwd=str(cwd), env=_scrubbed_env(cwd), capture_output=True, timeout=timeout)
     if os.name == "posix":
-        kwargs["preexec_fn"] = _posix_limits
+        kwargs["preexec_fn"] = functools.partial(_posix_limits, _user_tasks() + _CHILD_TASKS)
     try:
         p = subprocess.run(argv, **kwargs)
         return ExecResult(
