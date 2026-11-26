@@ -101,6 +101,7 @@ class ComputeAgent:
             last_error = (data.get("stderr") or res.error or "the program printed nothing")[-700:]
             feedback = json.dumps({"exit_code": data.get("exit_code"), "error": last_error, "fix": "Rewrite the complete program so it runs and print()s the results."})
             messages += tool_turns("run_python", {"code": code}, feedback)
-            await rt.step(f"Code failed, retrying ({attempt + 1}/2)", stage="verify")
+            if attempt < 2:
+                await rt.step(f"Code failed, retrying (attempt {attempt + 2} of 3)", stage="verify")
         rt.board.problems.append(f"The computation failed: {last_error[:300]}")
         return Handoff(False, "Computation failed.")

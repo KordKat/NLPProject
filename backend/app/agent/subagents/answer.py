@@ -54,6 +54,20 @@ def repeats_previous(rt: Runtime, answer: str) -> bool:
     return False
 
 
+_EMPTY_SOURCE = re.compile(r"(?m)^\s*[*_]*(sources?|references?)[*_]*\s*:?\s*[*_]*\s*$\n?", re.I)
+
+
+def tidy_answer(text: str) -> str:
+    """The UI renders $…$ math, the model sometimes writes \\(…\\) and \\[…\\]; it also leaves empty
+    "Source:" lines when there is nothing to cite. Code blocks are left untouched."""
+    parts = re.split(r"(```.*?```|`[^`\n]*`)", text, flags=re.S)
+    for i in range(0, len(parts), 2):
+        p = re.sub(r"\\\[(.+?)\\\]", lambda m: f"$${m.group(1).strip()}$$", parts[i], flags=re.S)
+        p = re.sub(r"\\\((.+?)\\\)", lambda m: f"${m.group(1).strip()}$", p, flags=re.S)
+        parts[i] = _EMPTY_SOURCE.sub("", p)
+    return "".join(parts).strip()
+
+
 def drop_repeats(text: str, previous: str, threshold: float = 0.6) -> str:
     """Removes sentences that restate `previous`. Code blocks are left alone."""
     words = lambda s: set(re.findall(r"[a-z0-9]{3,}", s.lower()))  # noqa: E731
@@ -86,8 +100,8 @@ class AnswerAgent:
             messages += tool_turns("get_results", {"for": "this request"}, results)
         return messages
 
-    async def _stream(self, rt: Runtime, messages: list[dict[str, str]]) -> tuple[str, str]:
-        params = GenerationParams(max_new_tokens=settings.llm_max_new_tokens, temperature=settings.llm_temperature, top_p=settings.llm_top_p)
+    async def _stream(self, rt: Runtime, messages: list[dict[str, str]], max_tokens: int = 0) -> tuple[str, str]:
+        params = GenerationParams(max_new_tokens=max_tokens or settings.llm_max_new_tokens, temperature=settings.llm_temperature, top_p=settings.llm_top_p)
         prompt, n = rt.engine.fit_prompt(messages, None, False, params.max_new_tokens)
         await rt.emit({"type": "status", "text": "Writing answer", "prompt_tokens": n})
         raw, sent = "", ""
@@ -108,6 +122,9 @@ class AnswerAgent:
         parts = [board.exact] if board.exact else []
         if board.deliveries:
             parts.append("Created:\n" + "\n".join(f"- {d}" for d in board.deliveries))
+        figures = [f for f in board.built if f.lower().endswith((".png", ".jpg", ".jpeg", ".svg"))]
+        if figures and not board.deliveries:
+            parts.append("Saved " + ", ".join(f"**{f}**" for f in figures) + " (shown below).")
         if board.brief:
             parts.append(f"**Key findings:** {board.brief}" if board.deliveries else board.brief)
         if board.computed:
@@ -117,13 +134,13 @@ class AnswerAgent:
         await rt.emit({"type": "text_delta", "text": text})
         return Handoff(True, "Delivered."), text
 
-    async def run(self, rt: Runtime, user_content: str, extends: str = "") -> tuple[Handoff, str]:
+    async def run(self, rt: Runtime, user_content: str, extends: str = "", max_tokens: int = 0) -> tuple[Handoff, str]:
         """`extends` is the answer being continued: anything restating it is removed."""
         messages = self._messages(rt, user_content)
-        text, sent = await self._stream(rt, messages)
+        text, sent = await self._stream(rt, messages, max_tokens)
         if not text.strip():  # the model ended its turn immediately: nudge it once
             messages.append({"role": "user", "content": "Write the answer now."})
-            text, sent = await self._stream(rt, messages)
+            text, sent = await self._stream(rt, messages, max_tokens)
         if extends:
             text = drop_repeats(text, extends) or "The previous answer already covers this. Tell me which part you want in more detail."
         elif repeats_previous(rt, text):
@@ -131,6 +148,7 @@ class AnswerAgent:
             await rt.emit({"type": "clear_answer"})
             messages += [{"role": "assistant", "content": text[:1200]}, {"role": "user", "content": f"That repeats an earlier answer. Answer this request instead: {rt.board.request[:500]}"}]
             text, sent = await self._stream(rt, messages)
+        text = tidy_answer(text)
         # figures are attached below the answer: drop inline copies of them
         text = re.sub(r"!\[[^\]]*\]\(([^)\s]+)\)\s*", lambda m: "" if any(m.group(1).endswith(f) or f.endswith(m.group(1)) for f in rt.board.built) else m.group(0), text).strip()
         missing = await asyncio.to_thread(missing_files, rt, text)

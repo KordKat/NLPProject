@@ -29,6 +29,9 @@ IMAGES = re.compile(r"\b(photos?|pictures?|images?)\s+of\b|\bshow me\b.*\b(photo
 _QSTOP = {"the", "and", "for", "with", "from", "into", "that", "this", "what", "how", "why", "are", "does", "about", "latest", "recent", "research", "overview", "using", "based"}
 
 
+_EXAMPLE_QUERIES = {q for _, queries in QUERY_SHOTS for q in queries}
+
+
 def _qtokens(q: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]{3,}", q.lower())) - _QSTOP
 
@@ -65,6 +68,7 @@ class ResearchAgent:
         out = await rt.llm(messages, max_new_tokens=80, temperature=0.0, prefill='["', stop=("]",))
         parsed = extract_json(out if out.rstrip().endswith("]") else out.rstrip().rstrip(",") + '"]')
         found = [str(q).strip()[:140] for q in parsed if isinstance(q, str)] if isinstance(parsed, list) else []
+        found = [q for q in found if q not in _EXAMPLE_QUERIES]  # copied from the in-context examples
         found = dedupe_queries([q for q in found if 2 <= len(q.split()) <= 16], used)[:4]
         return found or ([] if used else [keywords(task)])
 

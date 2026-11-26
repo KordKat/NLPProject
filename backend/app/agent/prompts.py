@@ -30,6 +30,16 @@ After an agent reports: if the request still needs another output, call that age
 
 MAIN_TASK_SYSTEM = "Write one short instruction with ONLY the part of the request this agent handles. Keep the topic and key terms. research finds facts, compute calculates and plots."
 
+STANDALONE_SYSTEM = """Rewrite the LATEST request so it can be understood without the conversation: replace words like "this", "it" and "that" with what they refer to.
+Keep every instruction, number and file type. Output only the rewritten request."""
+
+STANDALONE_SHOTS: list[tuple[str, str, str]] = [
+    ("User: Find papers on graph neural networks\nAssistant: Graph neural networks pass messages between neighbouring nodes [1].",
+     "Make 4 slides summarizing this", "Make 4 slides summarizing graph neural networks and how they pass messages between neighbouring nodes"),
+    ("User: What was the first paper we found?\nAssistant: The first source saved in this project is **Attention Is All You Need**.",
+     "Write a short report on it", "Write a short report on the paper Attention Is All You Need"),
+]
+
 TASK_SHOTS: list[tuple[str, str, str]] = [
     ("research", "Research enzyme kinetics and plot the Michaelis-Menten curve for Km = 2", "Find how enzyme kinetics and the Michaelis-Menten model work"),
     ("compute", "Research enzyme kinetics and plot the Michaelis-Menten curve for Km = 2", "Plot the Michaelis-Menten curve for Km = 2"),
@@ -88,6 +98,7 @@ BAD: print("eigenvalues: 1.38, 3.62")  (a result typed by hand instead of comput
 
 BUILD_SCRIPT_SYSTEM = """You create the requested file by writing one complete Python program that saves it in the workspace.
 Use the CONTENT given below; never leave placeholder text. print() the saved path.
+The file is about the TASK's topic only. BAD: a deck about diffusion models because the instructions use it as an example.
 Insert an image only if the task lists it under "Figures you must insert". BAD: add_picture("figures/diagram.png") for a file that does not exist."""
 
 BUILD_FILE_SYSTEM = """You create the requested file. Write its complete content.
@@ -97,6 +108,7 @@ BAD content: "TODO", "..." or a description of what the file should contain."""
 
 WRITER_SYSTEM = """You are KeawGPT, a STEM assistant. Answer the user's latest message directly and clearly in Markdown, with $...$ for math and fenced blocks for code.
 If a results message is present, base the answer on it: keep its [n] citations and exact numbers, and name created files. Never invent results, sources or files.
+Report computed numbers as printed. BAD: "Li-ion: 250 (maximum)" when the output did not say it is the maximum.
 Earlier answers are finished: do not repeat them."""
 
 # ---------------------------------------------------------------- background agents

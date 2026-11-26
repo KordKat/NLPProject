@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.model_engine import KeawEngine
-from app.agent.prompts import MAIN_AGENT, MAIN_TASK_SYSTEM, TASK_SHOTS
+from app.agent.prompts import MAIN_AGENT, MAIN_TASK_SYSTEM, STANDALONE_SHOTS, STANDALONE_SYSTEM, TASK_SHOTS
 from app.agent.runtime import call_prefill, tool_turns
 from app.agent.subagents import ANSWER_AGENT, SUB_AGENTS
 from app.agent.tool_parser import format_tool_call
@@ -62,6 +62,7 @@ _BUILD = re.compile(
     rf"|{_FILE_NOUN}[^.?!\n]{{0,30}}\b(save|saved)\b"
     r"|\b(what|which|list|show)\b[^.?!]{0,20}\bfiles?\b"
     r"|\b(delete|remove|rename|edit|update)\b[^.?!]{0,30}\.\w{2,5}\b"
+    r"|^\W*(please\s+)?(delete|remove|erase)\b[^.?!]{0,30}\b(files?|slides?|deck|presentation|report|charts?|figures?|plots?|notes|script)\b"
     r"|\b(convert|export)\b[^.?!]{0,30}\bpdf\b",
     re.I,
 )
@@ -119,6 +120,39 @@ async def choose_next(engine: KeawEngine, request: str, done: list[tuple[str, st
         messages += tool_turns(name, {"task": request[:120]}, note)
     probs = await engine.choose(messages, options, tools=tools, prefill=CHOICE_PREFILL)
     return max(probs, key=probs.get), probs
+
+
+REFERS_BACK = re.compile(r"\b(this(?!\s+(project|conversation|chat|workspace|session))|that|it|its|these|those|them|they|above|same|previous|earlier|last one)\b", re.I)
+_WORDS = re.compile(r"[a-z]{4,}")
+_SHOT_WORDS = {w for conv, _, rewritten in STANDALONE_SHOTS for w in _WORDS.findall((conv + " " + rewritten).lower())}
+
+
+def needs_standalone(text: str, has_history: bool) -> bool:
+    """A short follow-up that points at the previous turn ("summarize this", "a report on it")."""
+    if not has_history or len(text) > 300 or CONTINUATION.match(text) or not REFERS_BACK.search(text):
+        return False
+    return not route_by_rules(text, has_history=True).direct  # greetings and "rewrite that" use the history directly
+
+
+async def standalone(rt: Any, request: str, prev_request: str, prev_answer: str) -> str:
+    """Rewrites a follow-up into a request every sub-agent understands on its own."""
+    def conversation(user: str, assistant: str) -> str:
+        return f"User: {user[:300]}\nAssistant: {assistant[:700]}"
+
+    messages = [{"role": "system", "content": STANDALONE_SYSTEM}]
+    for conv, latest, rewritten in STANDALONE_SHOTS:
+        messages += [{"role": "user", "content": f"CONVERSATION:\n{conv}\nLATEST: {latest}"}, {"role": "assistant", "content": rewritten}]
+    messages.append({"role": "user", "content": f"CONVERSATION:\n{conversation(prev_request, prev_answer)}\nLATEST: {request}"})
+    out = await rt.llm(messages, max_new_tokens=80, temperature=0.0)
+    line = next((l.strip().strip('"') for l in out.strip().splitlines() if l.strip()), "")
+    # keep the original when the rewrite is unusable or dropped a number the user gave ("5 slides")
+    if not 8 <= len(line) <= 400 or not set(re.findall(r"\d+", request)) <= set(re.findall(r"\d+", line)):
+        return request
+    # with nothing to refer to, a small model fills in the example's topic ("Attention Is All You Need")
+    novel = set(_WORDS.findall(line.lower())) - set(_WORDS.findall(f"{request} {prev_request} {prev_answer}".lower()))
+    if len(novel & _SHOT_WORDS) >= 2:
+        return request
+    return line
 
 
 def split_task(agent: str, request: str) -> str:

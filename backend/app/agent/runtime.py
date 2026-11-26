@@ -45,6 +45,7 @@ class Blackboard:
     built: list[str] = field(default_factory=list)
     deliveries: list[str] = field(default_factory=list)  # verified descriptions of finished files
     exact: str = ""  # a complete answer read directly from stored data
+    earlier: str = ""  # the previous answer, when this request refers to it ("summarize this")
     memory: str = ""
     documents: list[str] = field(default_factory=list)  # attached / named project files
     problems: list[str] = field(default_factory=list)
@@ -53,10 +54,15 @@ class Blackboard:
     cited: list[str] = field(default_factory=list)  # source keys, in citation order
 
     def for_compute(self) -> str:
-        return f"Research notes:\n{self.brief}" if self.brief else ""
+        parts = [f"Earlier answer the request refers to:\n{self.earlier[:1500]}"] if self.earlier else []
+        if self.brief:
+            parts.append(f"Research notes:\n{self.brief}")
+        return "\n\n".join(parts)
 
     def for_build(self) -> str:
         parts = list(self.documents)
+        if self.earlier:
+            parts.append(f"Earlier answer the request refers to (use it as the content):\n{self.earlier[:2000]}")
         if self.memory:
             parts.append(f"Earlier project work:\n{self.memory[:900]}")
         if self.brief:

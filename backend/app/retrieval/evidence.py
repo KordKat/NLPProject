@@ -47,7 +47,7 @@ _CURRENCY = re.compile(r"\b(latest|newest|most recent|current|currently)\b", re.
 _REF_MARKS = re.compile(r"\s+(?:\(\d{1,3}(?:\s*[,–\-]\s*\d{1,3})*\)|\[\s*\d{1,3}(?:\s*[,–\-]\s*\d{1,3})*\s*\])")
 _LABEL = re.compile(r"^(Source|Note|Abstract|Summary|Description|Overview)\s*:\s*", re.I)
 # page navigation and course blurbs are written as commands to the reader
-_PROMO = re.compile(r"^(Learn|Find|Discover|Explore|Read|Get|See|Browse|Join|Check|Download|Watch|Try|Sign|Subscribe|Click|Visit)\b")
+_PROMO = re.compile(r"^(Learn|Find|Discover|Explore|Read|Get|See|Browse|Join|Check|Download|Watch|Try|Sign|Subscribe|Click|Visit|Understand|Compare|A data-driven look)\b")
 # the model saying the facts do not contain the answer
 _NO_ANSWER = re.compile(
     r"\b(not|n't|no)\b[^.]{0,40}\b(stated|mentioned|specified|provided|given|included|available)\b[^.]{0,30}\b(facts?|text|information|context|sources?)\b"
@@ -143,7 +143,9 @@ def select_facts(question: str, candidates: Iterable[dict[str, Any]], *, expecte
     topic = q_stems | _stems(_terms(expected))
     pool: list[tuple[str, str]] = []
     for c in candidates:
-        text = " ".join([c.get("abstract") or ""] + [ch.get("text", "") for ch in c.get("chunks") or []])
+        # a fetched page's own text replaces its search-result blurb ("Understand … in 2026")
+        blurb = "" if c.get("kind") == "web_fetched" and c.get("chunks") else (c.get("abstract") or "")
+        text = " ".join([blurb] + [ch.get("text", "") for ch in c.get("chunks") or []])
         sents = [clean_fact(s) for s in dict.fromkeys(split_sentences(text)) if _usable(s) and _on_topic(s, topic) and _stems(_terms(s)) & q_stems]
         # a cheap lexical pass keeps the embedding step small on long pages
         sents = sorted(sents, key=lambda s: len(topic & _stems(_terms(s))), reverse=True)[:20]

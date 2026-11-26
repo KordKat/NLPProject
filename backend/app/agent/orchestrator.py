@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from app.agent import context_manager
 from app.agent.model_engine import GenerationCancelled, ModelUnavailableError, get_engine
-from app.agent.router import CONTINUATION, choose_next, route_by_rules, write_task
+from app.agent.router import CONTINUATION, choose_next, needs_standalone, route_by_rules, standalone, write_task
 from app.agent.runtime import Blackboard, Runtime
 from app.agent.subagents import ANSWER_AGENT, SUB_AGENTS
 from app.agent.subagents.curator import curate
@@ -147,16 +147,25 @@ class Orchestrator:
 
         # "continue" means: carry on with the previous request
         request = self.message
+        intent = request  # what the user asked for decides the route; a rewrite only adds the topic
         if CONTINUATION.match(request):
             previous, last_answer, finished = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
             if previous and finished:  # extend the finished answer instead of repeating it
                 await rt.step("Continuing the previous answer", stage="plan")
                 rt.history = [{"role": "user", "content": previous[:600]}, {"role": "assistant", "content": last_answer[-1500:]}]
-                _, text = await ANSWER_AGENT.run(rt, "Continue with new points your answer did not cover. Start with the first new point.", extends=last_answer)
+                _, text = await ANSWER_AGENT.run(rt, "Continue with new points your answer did not cover. Start with the first new point.", extends=last_answer, max_tokens=700)
                 return {"text": text, "plan": {"task_type": "answer", "tasks": []}}
             if previous:  # the last run did not finish: do it again
-                request = previous
+                request = intent = previous
                 await rt.step("Retrying the previous request", stage="plan")
+        elif needs_standalone(request, bool(rt.history)):
+            prev_request, prev_answer, _ = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
+            if prev_answer.strip():
+                rewritten = await standalone(rt, request, prev_request, prev_answer)
+                if rewritten != request:
+                    await rt.step(f"Understood as: {rewritten[:160]}", stage="plan")
+                    request = rewritten
+                self.board.earlier = re.sub(r"(?m)^> \*\*Note:\*\*.*$", "", prev_answer).strip()
         if self.attachments:
             request += "\n\nAttached files: " + ", ".join(self.attachments)
         self.board.request = request
@@ -164,7 +173,7 @@ class Orchestrator:
         await self._load_documents(request)
 
         await self.emit({"type": "status", "text": "Planning"})
-        route = route_by_rules(request, has_history=bool(rt.history))
+        route = route_by_rules(intent, has_history=bool(rt.history))
         queue = list(route.agents)
         allowed = ["research", "compute", "build"]
         if self.research_mode == "off":
@@ -206,11 +215,16 @@ class Orchestrator:
         await asyncio.to_thread(self._update_run, task_type=("+".join(self.chain) or "answer")[:30], plan={"agents": self.chain, "request": request[:500]},
                                 retrieval_rounds=self.board.rounds, queries=self.board.queries, evidence=json.loads(json.dumps(self.ctx.evidence, default=str)))
         await self.emit({"type": "plan", "task_type": "+".join(self.chain) or "answer", "main_question": request[:200], "subquestions": []})
-        verified_research = bool(self.board.brief) and set(self.chain) <= {"research", "compute"}
-        if self.board.exact or (self.chain[-1:] == ["build"] and self.board.deliveries) or verified_research:
+        board = self.board
+        verified_research = bool(board.brief) and set(self.chain) <= {"research", "compute"}
+        # a failed file is reported, never described: the writer would invent the file's contents
+        build_failed = "build" in self.chain and not board.deliveries
+        # a plot is the answer: the writer would redraw it as text
+        plotted = self.chain == ["compute"] and any(f.lower().endswith((".png", ".jpg", ".jpeg", ".svg")) for f in board.built)
+        if board.exact or (self.chain[-1:] == ["build"] and board.deliveries) or verified_research or build_failed or plotted:
             _, text = await ANSWER_AGENT.deliver(rt)
         else:
-            _, text = await ANSWER_AGENT.run(rt, request)
+            _, text = await ANSWER_AGENT.run(rt, request, max_tokens=700 if "compute" in self.chain else 0)
         return {"text": text, "plan": {"task_type": "+".join(self.chain) or "answer", "tasks": [SUB_AGENTS[a].label for a in self.chain]}}
 
     async def _load_documents(self, request: str) -> None:
