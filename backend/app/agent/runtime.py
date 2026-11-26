@@ -84,7 +84,7 @@ class Blackboard:
         if self.built:
             parts.append("Files created (they are attached; name them and say what they contain, do not paste their content):\n" + "\n".join(f"- {f}" for f in self.built))
         if self.problems:
-            parts.append("What went wrong (say so plainly, do not pretend it worked):\n" + "\n".join(f"- {p}" for p in self.problems))
+            parts.append("Problems:\n" + "\n".join(f"- {p}" for p in self.problems))
         return "\n\n".join(parts)
 
 

@@ -17,6 +17,13 @@ _SCRIPT = re.compile(r"\b(?:run|execute)\s+(?:the\s+|my\s+)?(?:script\s+)?([\w\-
 _DATA = re.compile(r"[\w\-./\\]+\.(?:csv|tsv|json|xlsx)\b", re.I)
 
 
+def error_tail(stderr: str, limit: int = 900) -> str:
+    """The traceback itself: library warnings printed before it (e.g. ConvergenceWarning) push the
+    real error out of view, and the model then "fixes" the warning instead of the bug."""
+    start = stderr.rfind("Traceback (most recent call last)")
+    return (stderr[start:] if start >= 0 else stderr)[-limit:]
+
+
 def pure_arithmetic(task: str) -> str:
     """The expression when the task is nothing but plain arithmetic (needs no model call)."""
     m = _ARITH.search(task)
@@ -98,10 +105,10 @@ class ComputeAgent:
                 summary = stdout[:1800] + (f"\nFigures saved: {', '.join(images)}" if images else "")
                 rt.board.computed.append(summary.strip())
                 return Handoff(True, ("Output produced. " + (f"Saved {', '.join(files)}." if files else "")).strip(), summary)
-            last_error = (data.get("stderr") or res.error or "the program printed nothing")[-700:]
+            last_error = error_tail(data.get("stderr") or res.error or "the program printed nothing")
             feedback = json.dumps({"exit_code": data.get("exit_code"), "error": last_error, "fix": "Rewrite the complete program so it runs and print()s the results."})
             messages += tool_turns("run_python", {"code": code}, feedback)
             if attempt < 2:
                 await rt.step(f"Code failed, retrying (attempt {attempt + 2} of 3)", stage="verify")
-        rt.board.problems.append(f"The computation failed: {last_error[:300]}")
+        rt.board.problems.append(f"The computation failed after 3 attempts. Last error: `{last_error.strip().splitlines()[-1][:200]}`")
         return Handoff(False, "Computation failed.")

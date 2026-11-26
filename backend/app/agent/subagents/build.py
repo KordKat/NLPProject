@@ -14,7 +14,8 @@ from app.services.artifact_storage import WorkspaceError, resolve_in_workspace, 
 settings = get_settings()
 
 SLIDES = re.compile(r"\b(pptx|power ?point|slides?|slide ?deck|presentation|keynote)\b", re.I)
-REPORT = re.compile(r"\b(report|white ?paper|write-?up)\b", re.I)
+# "report" as the thing to create, not the verb ("report accuracy for each model")
+REPORT = re.compile(r"\b(write|create|make|generate|prepare|produce|draft|compile)\b[^.?!\n]{0,40}\b(report|white ?paper|write-?up)\b|\b(report|write-?up)\s+(on|about)\b", re.I)
 TO_PDF = re.compile(r"\b(convert|export|turn)\b.*\bpdf\b", re.I)
 LIST = re.compile(r"\b(what|which|list|show)\b.*\bfiles?\b", re.I)
 DELETE = re.compile(r"^\W*(please\s+)?(delete|remove|erase)\b", re.I)

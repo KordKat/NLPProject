@@ -53,7 +53,10 @@ _COMPUTE = re.compile(
     r"|\b(calculate|compute|evaluate)\b[^.?!]{0,50}\d"
     r"|\b(analy[sz]e|statistics|regression|t-test|anova|correlation)\b[^.?!]{0,50}\.(csv|tsv|xlsx|json)\b"
     r"|\b(analy[sz]e|test)\b[^.?!]{0,30}\b(dataset|data file|csv)\b"
-    r"|\b(run|execute)\b[^.?!]{0,30}(`|\.py\b)",
+    r"|\b(run|execute)\b[^.?!]{0,30}(`|\.py\b)"
+    # machine learning is computed, not built: "train … and report accuracy" asks for numbers, not a report file
+    r"|\b(train|fit|evaluate|benchmark|cross-?validate)\w*\b[^.?!]{0,60}\b(models?|classifiers?|regressors?|dataset|data|accuracy|sklearn|scikit)\b"
+    r"|\b(sklearn|scikit-learn|xgboost|lightgbm)\b",
     re.I,
 )
 _FILE_NOUN = r"(pptx|power ?point|slides?|slide ?deck|presentation|landing page|web ?page|website|html|script|notebook|file|document|\.(?:py|md|csv|json|txt|tex|html|docx))"

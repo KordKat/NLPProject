@@ -219,9 +219,10 @@ class Orchestrator:
         verified_research = bool(board.brief) and set(self.chain) <= {"research", "compute"}
         # a failed file is reported, never described: the writer would invent the file's contents
         build_failed = "build" in self.chain and not board.deliveries
+        compute_failed = self.chain == ["compute"] and not board.computed and bool(board.problems)
         # a plot is the answer: the writer would redraw it as text
         plotted = self.chain == ["compute"] and any(f.lower().endswith((".png", ".jpg", ".jpeg", ".svg")) for f in board.built)
-        if board.exact or (self.chain[-1:] == ["build"] and board.deliveries) or verified_research or build_failed or plotted:
+        if board.exact or (self.chain[-1:] == ["build"] and board.deliveries) or verified_research or build_failed or compute_failed or plotted:
             _, text = await ANSWER_AGENT.deliver(rt)
         else:
             _, text = await ANSWER_AGENT.run(rt, request, max_tokens=700 if "compute" in self.chain else 0)
