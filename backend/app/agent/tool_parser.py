@@ -95,13 +95,14 @@ def _parse_json_body(body: str) -> list[ToolCall]:
     items = obj if isinstance(obj, list) else [obj]
     for it in items:
         if isinstance(it, dict) and "name" in it:
-            args = it.get("arguments") or it.get("parameters") or {}
+            args = it.get("arguments", it.get("parameters", {}))
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except json.JSONDecodeError:
-                    args = {"input": args}
-            calls.append(ToolCall(name=str(it["name"]), arguments=dict(args), raw=body))
+                    continue
+            if isinstance(args, dict) and isinstance(it["name"], str):
+                calls.append(ToolCall(name=it["name"], arguments=args, raw=body))
     return calls
 
 
@@ -121,6 +122,22 @@ def parse_tool_calls(text: str) -> list[ToolCall]:
         if not found:
             calls.extend(_parse_json_body(block))
     return calls
+
+
+def parse_prefilled_call(text: str, expected: str) -> dict[str, str]:
+    """Read one complete native call before executing a model-generated action."""
+    outer = re.fullmatch(r"\s*<tools_call>\s*<function=([\w.-]+)>\s*(.*?)\s*</function>\s*</tools_call>\s*", text, re.S)
+    if outer is None or outer.group(1) != expected:
+        return {}
+    remaining = outer.group(2)
+    args: dict[str, str] = {}
+    while remaining:
+        param = re.match(r"<parameter=([\w-]+)>(.*?)</parameter>\s*", remaining, re.S)
+        if param is None or param.group(1) in args or STRAY_TAG_RE.search(param.group(2)):
+            return {}
+        args[param.group(1)] = _strip_value(param.group(2))
+        remaining = remaining[param.end():]
+    return args
 
 
 def has_stray_tool_markup(text: str) -> bool:

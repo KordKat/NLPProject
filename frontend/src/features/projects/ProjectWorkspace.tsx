@@ -215,7 +215,8 @@ export default function ProjectWorkspace() {
                       activity={m.meta?.activity || []}
                       sources={m.meta?.sources || []}
                       artifacts={m.meta?.artifacts || []}
-                      error={m.meta?.status === "failed" ? m.meta?.error : m.meta?.status === "cancelled" ? "Run cancelled." : undefined}
+                      outcome={m.meta?.status}
+                      error={m.meta?.status === "failed" && !m.content ? m.meta?.error : m.meta?.status === "cancelled" ? "Run cancelled." : undefined}
                       feedback={m.meta?.feedback}
                       skills={m.meta?.skills}
                       onOpenArtifact={(a) => openArtifact(a)}
@@ -237,6 +238,7 @@ export default function ProjectWorkspace() {
                       artifacts={draft.artifacts}
                       live={run.running}
                       status={draft.status}
+                      outcome={draft.outcome}
                       error={draft.error || (draft.cancelled ? "Run cancelled." : undefined)}
                       onOpenArtifact={(a) => openArtifact(a)}
                       onImage={(src, alt, attribution) => setLightbox({ src, alt, attribution })}

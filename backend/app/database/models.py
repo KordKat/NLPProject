@@ -132,7 +132,7 @@ class ResearchRun(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
     user_question: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="running")  # running|completed|failed|cancelled
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|completed|partial|failed|cancelled
     task_type: Mapped[str] = mapped_column(String(30), default="chat")
     plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     retrieval_rounds: Mapped[int] = mapped_column(Integer, default=0)

@@ -13,10 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.model_engine import KeawEngine
-from app.agent.prompts import MAIN_AGENT, MAIN_TASK_SYSTEM, STANDALONE_SHOTS, STANDALONE_SYSTEM, TASK_SHOTS
-from app.agent.runtime import call_prefill, tool_turns
+from app.agent.prompts import MAIN_AGENT, STANDALONE_SHOTS, STANDALONE_SYSTEM
+from app.agent.runtime import tool_turns
 from app.agent.subagents import ANSWER_AGENT, SUB_AGENTS
-from app.agent.tool_parser import format_tool_call
 
 CHOICE_PREFILL = "\n<tools_call>\n<function="
 
@@ -59,9 +58,14 @@ _COMPUTE = re.compile(
     r"|\b(sklearn|scikit-learn|xgboost|lightgbm)\b",
     re.I,
 )
+_SUBTRACTION = re.compile(r"^\s*(?:what is\s+)?[-−]?\d+(?:\.\d+)?\s*[-−]\s*[-−]?\d+(?:\.\d+)?\s*[?=]?\s*$", re.I)
+_DATA_REQUEST = re.compile(
+    r"\b(explain|summari[sz]e|inspect|describe|analy[sz]e|profile|compare)\b[\s\S]*\.(csv|tsv|xlsx|json|parquet|npy)\b",
+    re.I,
+)
 _FILE_NOUN = r"(pptx|power ?point|slides?|slide ?deck|presentation|landing page|web ?page|website|html|script|notebook|file|document|\.(?:py|md|csv|json|txt|tex|html|docx))"
 _BUILD = re.compile(
-    rf"\b(make|create|build|generate|write|design|produce|prepare|save|draft)\b[^.?!\n]{{0,60}}{_FILE_NOUN}"
+    rf"\b(make|create|build|generate|write|design|produce|prepare|save|draft|turn|convert|export)\b[^.?!\n]{{0,60}}{_FILE_NOUN}"
     rf"|{_FILE_NOUN}[^.?!\n]{{0,30}}\b(save|saved)\b"
     r"|\b(what|which|list|show)\b[^.?!]{0,20}\bfiles?\b"
     r"|\b(delete|remove|rename|edit|update)\b[^.?!]{0,30}\.\w{2,5}\b"
@@ -77,7 +81,6 @@ _CLAUSE = re.compile(
     r"(?=(?:please\s+)?(?:research|investigate|find|search|look up|plot|graph|draw|compute|calculate|evaluate|simulate|visuali[sz]e|solve|analy[sz]e)\b)",
     re.I,
 )
-_REFERS_BACK = re.compile(r"\b(it|them|this|that|these|those|results?|findings)\b", re.I)
 _FRESH = re.compile(r"\b(latest|newest|recent|new papers?|web|online|internet|search)\b", re.I)
 _LIST_FILES = re.compile(r"\b(what|which|list|show)\b[^.?!]{0,20}\bfiles?\b", re.I)
 _REPORT = re.compile(r"\b(write|create|make|generate|prepare|produce|draft)\b[^.?!\n]{0,40}\b(report|white ?paper|literature review)\b", re.I)
@@ -87,11 +90,12 @@ _REPORT = re.compile(r"\b(write|create|make|generate|prepare|produce|draft)\b[^.
 class Route:
     agents: list[str] = field(default_factory=list)  # ordered, from explicit signals
     direct: bool = False  # answer immediately (greeting, rewrite of the last answer)
+    explicit_research: bool = False
 
 
 def route_by_rules(text: str, has_history: bool = False) -> Route:
     head = text.strip()
-    if _CHAT.match(head) or (has_history and _REWRITE.match(head)):
+    if _CHAT.match(head):
         return Route(direct=True)
     if _SNIPPET.match(head) and not _WANTS_FILE.search(head):
         return Route(direct=True)
@@ -99,13 +103,14 @@ def route_by_rules(text: str, has_history: bool = False) -> Route:
     if _RECALL.search(head) and not _LIST_FILES.search(head):
         agents.append("recall")
     # a question about earlier work is answered from memory unless it also asks for something new
-    if (_RESEARCH.search(head) or _REPORT.search(head)) and ("recall" not in agents or _FRESH.search(head)):
+    explicit_research = bool(_RESEARCH.search(head))
+    if (explicit_research or _REPORT.search(head)) and ("recall" not in agents or _FRESH.search(head)):
         agents.append("research")
-    if _COMPUTE.search(head):
+    if _COMPUTE.search(head) or _SUBTRACTION.fullmatch(head) or _DATA_REQUEST.search(head):
         agents.append("compute")
     if _BUILD.search(head) or _REPORT.search(head):
         agents.append("build")
-    return Route(agents=agents)
+    return Route(agents=agents, direct=not agents and has_history and bool(_REWRITE.match(head)), explicit_research=explicit_research)
 
 
 def agent_schema(agent: Any) -> dict[str, Any]:
@@ -160,30 +165,21 @@ async def standalone(rt: Any, request: str, prev_request: str, prev_answer: str)
 
 def split_task(agent: str, request: str) -> str:
     """The clause of a multi-part request that belongs to this agent, or "" if it cannot be separated."""
-    signal = {"research": _RESEARCH, "compute": _COMPUTE}.get(agent)
+    signals = {"research": (_RESEARCH,), "compute": (_COMPUTE, _SUBTRACTION, _DATA_REQUEST)}.get(agent, ())
     clauses = [c.strip(" .;,") for c in _CLAUSE.split(request) if c.strip(" .;,")]
-    if signal is None or len(clauses) < 2:
+    if not signals or len(clauses) < 2:
         return ""
-    mine = next((c for c in clauses if signal.search(c)), "")
-    if mine and _REFERS_BACK.search(mine):  # "plot it" needs to know what "it" is
-        other = next(c for c in clauses if c != mine)
-        return f"{mine} (refers to: {other})"
-    return mine
+    matching = [c for c in clauses if any(signal.search(c) for signal in signals)]
+    other = [c for c in clauses if c not in matching]
+    if not matching or not other:
+        return ""
+    return " and ".join(matching) + "\n\nRequest context: " + " and ".join(other)
 
 
 async def write_task(rt: Any, agent: str, request: str, shared: bool = False) -> str:
-    """Gives an agent only its part of the request: split by code when possible, and condensed by the
-    model only when a long request cannot be split. Build and Recall always see everything."""
+    """Put the agent's clauses first while keeping the rest available as context."""
     if agent in ("build", "recall"):
         return request
     if shared and (part := split_task(agent, request)):
         return part
-    if len(request) <= 400:
-        return request
-    messages = [{"role": "system", "content": MAIN_TASK_SYSTEM}]
-    for agent_name, req, task in TASK_SHOTS:
-        messages += [{"role": "user", "content": f"Agent: {agent_name}\nRequest: {req}"}, {"role": "assistant", "content": format_tool_call(agent_name, {"task": task})}]
-    messages.append({"role": "user", "content": f"Agent: {agent}\nRequest: {request[:3000]}"})
-    out = await rt.llm(messages, max_new_tokens=45, temperature=0.0, prefill=call_prefill(agent, "task"), stop=("</parameter>",))
-    task = re.sub(r"<[^>]+>", " ", out.split("<parameter=task>")[-1]).strip()
-    return task[:300] if len(task) >= 12 else request[:400]
+    return request

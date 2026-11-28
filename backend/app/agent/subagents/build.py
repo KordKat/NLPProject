@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 
-from app.agent.prompts import BUILD_FILE_SYSTEM, BUILD_SCRIPT_SYSTEM
+from app.agent.prompts import BUILD_FILE_SYSTEM
 from app.agent.runtime import Handoff, Runtime, call_prefill, tool_turns
-from app.agent.tool_parser import parse_tool_calls
+from app.agent.tool_parser import parse_prefilled_call
 from app.config import get_settings
 from app.services.artifact_storage import WorkspaceError, resolve_in_workspace, workspace_dir
 
@@ -23,7 +24,74 @@ EDIT = re.compile(r"\b(edit|update|modify|change|fix|append|add to|rewrite)\b", 
 _PATH = re.compile(r"[\w\-./]+\.(?:pptx|md|html?|py|txt|csv|json|tex|js|ts|css|ya?ml|ipynb|sh)\b", re.I)
 
 
-_SLIDE_COUNT = re.compile(r"\b(\d{1,2})[- ]slides?\b", re.I)
+_SLIDE_COUNT = re.compile(r"\b(\d+)[- ]slides?\b", re.I)
+_PRESENTATION_PATH = re.compile(r"[\w\-./]+\.pptx\b", re.I)
+_REPORT_PATH = re.compile(r"\b(?:as|to|into|named|called)\s+[`'\" ]*([\w\-./]+\.md)\b", re.I)
+_SLIDE_SYSTEM = """Draft one PowerPoint slide with a short title and 2-4 concise bullets.
+Use the requested topic and source material. Use this format:
+Title: How evaporation works
+- Energetic molecules escape the liquid surface.
+- Warmer liquids evaporate faster.
+End slide"""
+_SLIDE_TITLE = re.compile(r"^(?:#+\s*)?\**Title:\s*\**\s*(.+)", re.I)
+_SLIDE_BULLET = re.compile(r"^(?:[-*•]|\d+[.)])\s+(.+)")
+
+
+def read_slide(raw: str) -> dict[str, Any] | None:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines or not (heading := _SLIDE_TITLE.match(lines[0])):
+        return None
+    title = heading.group(1).strip(" *")
+    if not 0 < len(title) <= 80:
+        return None
+    bullets = [match.group(1).strip() for line in lines[1:] if (match := _SLIDE_BULLET.match(line))]
+    bullets = [bullet for bullet in bullets if 0 < len(bullet) <= 160][:6]
+    if not bullets:
+        return None
+    return {"title": title, "bullets": bullets}
+
+
+def presentation_program(path: str, slides: list[dict[str, Any]], figures: list[str]) -> str:
+    payload = base64.b64encode(json.dumps({"path": path, "slides": slides, "figures": figures}).encode("utf-8"))
+    return f"""
+import base64
+import json
+from pathlib import Path
+from pptx import Presentation
+from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.util import Inches, Pt
+
+deck = Presentation()
+deck.slide_width = Inches(13.333)
+deck.slide_height = Inches(7.5)
+data = json.loads(base64.b64decode({payload!r}))
+slides = data["slides"]
+figures = data["figures"]
+for index, item in enumerate(slides):
+    slide = deck.slides.add_slide(deck.slide_layouts[1])
+    slide.shapes.title.text = item["title"]
+    slide.shapes.title.width = Inches(12)
+    content = slide.placeholders[1]
+    content.width = Inches(12)
+    text = content.text_frame
+    text.word_wrap = True
+    text.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    picture = figures[index - (len(slides) - len(figures))] if index >= len(slides) - len(figures) else None
+    if picture:
+        content.width = Inches(6.1)
+    for position, bullet in enumerate(item["bullets"]):
+        paragraph = text.add_paragraph() if position else text.paragraphs[0]
+        paragraph.text = bullet
+        paragraph.font.size = Pt(18 if picture else 24)
+    if picture:
+        shape = slide.shapes.add_picture(picture, Inches(7.05), Inches(2.1), width=Inches(5.6))
+        if shape.height > Inches(4.6):
+            shape.width = int(shape.width * Inches(4.6) / shape.height)
+            shape.height = Inches(4.6)
+output = Path(data["path"])
+output.parent.mkdir(parents=True, exist_ok=True)
+deck.save(str(output))
+"""
 
 
 _KINDS = (
@@ -83,16 +151,6 @@ def files_matching(project_id: str, task: str) -> tuple[list[str], str]:
     return [f for f in files if any(test(f.lower()) for _, test in kinds)], kinds[0][0]
 
 
-def slide_count(project_id: str, rel: str) -> int:
-    try:
-        from pptx import Presentation
-
-        full, _ = resolve_in_workspace(project_id, rel)
-        return len(Presentation(str(full)).slides)
-    except Exception:
-        return 0
-
-
 def describe_file(project_id: str, rel: str) -> str:
     """A description read from the real file, so the reply can never misreport what was built."""
     try:
@@ -131,6 +189,9 @@ class BuildAgent:
             return Handoff(res.ok, f"Deleted {targets[0]}." if res.ok else res.error[:120])
         if LIST.search(task) and not SLIDES.search(task):
             res = await rt.execute("list_files", {"path": ""})
+            if not res.ok:
+                rt.board.problems.append(f"The project files could not be listed: {res.error}")
+                return Handoff(False, "Could not list files.")
             files = [f["path"] for f in (res.data or {}).get("files", []) if not f["path"].endswith("/") and f.get("type", "file") != "dir"]
             # the answer is the listing itself: a model would describe files it has not opened
             rt.board.exact = ("Files in this project:\n" + "\n".join(f"- {f}" for f in files)) if files else "This project has no files yet."
@@ -141,23 +202,25 @@ class BuildAgent:
             if not res.ok:
                 rt.board.problems.append(res.error)
                 return Handoff(False, res.error[:120])
-            rt.board.built.append(f"{md[:-3]}.pdf (converting in the background)")
+            pdf = (res.data or {}).get("path") or f"{md[:-3]}.pdf"
+            rt.board.exact = f"PDF conversion for **{pdf}** is in progress."
             return Handoff(True, f"Converting {md} to PDF.")
         if SLIDES.search(task):
-            return await self._script(rt, task, ".pptx")
+            return await self._presentation(rt, task)
         if REPORT.search(task):
             return await self._report(rt, task)
         return await self._file(rt, task)
 
     async def _report(self, rt: Runtime, task: str) -> Handoff:
-        if rt.board.rounds and not rt.board.facts:  # research ran for this report and found nothing
+        if rt.board.research_attempted and not rt.board.facts:
             return Handoff(False, "No evidence to write the report from.")
         title =re.sub(r"^(please\s+)?(write|create|make|generate|prepare)\s+(me\s+)?(an?\s+)?(detailed\s+|full\s+|short\s+)?(research\s+)?report\s+(on|about)\s+", "", task.strip(), flags=re.I)
         title = re.sub(r"\(?https?://\S+\)?|\.\.\.|…", "", title)  # a rewritten request can carry a link
         title = re.sub(r"^(the\s+)?(paper|article|source|study)\s+", "", title.strip(), flags=re.I)
         title = title.rstrip(".").strip()[:90]
         title = (title[0].upper() + title[1:]) if title else "Research Report"
-        res = await rt.execute("generate_report", {"title": title, "output_path": "report.md"})
+        named = _REPORT_PATH.search(task)
+        res = await rt.execute("generate_report", {"title": title, "output_path": named.group(1) if named else "report.md"})
         if not res.ok:
             rt.board.problems.append(res.error)
             return Handoff(False, res.error[:140])
@@ -170,56 +233,61 @@ class BuildAgent:
         rt.board.deliveries.append(detail)
         return Handoff(True, f"Created {info['report']} ({info.get('words')} words).")
 
-    async def _script(self, rt: Runtime, task: str, ext: str) -> Handoff:
-        """Files that need a library (e.g. .pptx): the model writes a program, the sandbox runs it."""
+    async def _presentation(self, rt: Runtime, task: str) -> Handoff:
+        """Have the model draft slide content and render the validated outline with application code."""
         if not rt.has_tool("run_python"):
             rt.board.problems.append("Python execution is disabled, so the file could not be created.")
             return Handoff(False, "Python execution is disabled.")
-        # the file type picks the skill: "slides about a bar chart" must not get the plotting skill
-        kind = "PowerPoint presentation slides pptx" if ext == ".pptx" else ext
-        skills = await rt.skill_text(f"{kind}. {task[:300]}", limit=1, max_tokens=1000)
-        system = BUILD_SCRIPT_SYSTEM + (f"\n\n{skills}" if skills else "")
+        wanted = _SLIDE_COUNT.search(task)
+        count = int(wanted.group(1)) if wanted else 5
+        if not 1 <= count <= 100:
+            rt.board.problems.append("Choose a slide count from 1 to 100.")
+            return Handoff(False, "Invalid slide count.")
+        named = _PRESENTATION_PATH.search(task)
+        requested_path = named.group() if named else "slides/presentation.pptx"
+        try:
+            _, rel = resolve_in_workspace(rt.project_id, requested_path)
+            path = unique_path(rt.project_id, rel)
+        except WorkspaceError as exc:
+            rt.board.problems.append(str(exc))
+            return Handoff(False, "Invalid PowerPoint path.")
         content = rt.board.for_build()
-        figures = [f for f in rt.board.built if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-        extra = f"\n\nFigures you must insert: {', '.join(figures)}" if figures else "\n\nNo figures exist: use text only."
-        user = f"{('CONTENT:' + chr(10) + content + chr(10) + chr(10)) if content else ''}TASK: {task[:2500]}{extra}"
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        schemas = rt.schemas("run_python")
-        last_error = ""
-        for attempt in range(3):
-            out = await rt.llm(messages, max_new_tokens=settings.llm_max_new_tokens, temperature=0.2, tools=schemas, prefill=call_prefill("run_python", "code"))
-            calls = parse_tool_calls(out)
-            code = (calls[0].arguments.get("code") or "").strip() if calls else ""
-            if not code:
-                last_error = "no code was produced"
-                continue
-            res = await rt.execute("run_python", {"code": code})
-            data = res.data if isinstance(res.data, dict) else {}
-            files = list(data.get("files", [])) + [i.get("path", "") for i in data.get("images", [])]
-            made = [f for f in files if f.lower().endswith(ext)]
-            wanted = _SLIDE_COUNT.search(task)
-            actual = await asyncio.to_thread(slide_count, rt.project_id, made[0]) if res.ok and made and wanted else 0
-            if actual and actual != int(wanted.group(1)):
+        slides = []
+        for number in range(1, count + 1):
+            titles = [slide["title"] for slide in slides]
+            user = f"TASK: {task}\n\n"
+            if content:
+                user += f"SOURCE MATERIAL:\n{content}\n\n"
+            if titles:
+                user += "TOPICS ALREADY COVERED: " + ", ".join(titles) + "\n\n"
+            focus = ("Introduce the topic" if number == 1 else "End with the main takeaway" if number == count else
+                     ("Explain a core concept", "Describe how it works", "Give a concrete example")[(number - 2) % 3])
+            user += f"Write slide {number} of {count}. {focus}, following any specific slide order in the task."
+            for attempt in range(3):
+                feedback = "\nAdd new points and begin each bullet with a hyphen." if attempt else ""
+                out = await rt.llm([{"role": "system", "content": _SLIDE_SYSTEM}, {"role": "user", "content": user + feedback}],
+                                   max_new_tokens=160, temperature=0.2, prefill="Title: ", stop=("\nEnd slide",))
+                slide = read_slide(out)
+                if slide and all(slide["bullets"] != existing["bullets"] for existing in slides):
+                    if slide["title"].casefold() in {title.casefold() for title in titles}:
+                        slide["title"] = f"{slide['title']} ({number})"
+                    slides.append(slide)
+                    break
                 if attempt < 2:
-                    n = int(wanted.group(1))
-                    change = f"add {n - actual} more slide{'s' if n - actual > 1 else ''}" if actual < n else f"remove {actual - n} slide{'s' if actual - n > 1 else ''}"
-                    feedback = json.dumps({"problem": f"The deck has {actual} slides but the task asked for exactly {n}.", "fix": f"Rewrite the complete program and {change}: call add_slide exactly {n} times."})
-                    messages += tool_turns("run_python", {"code": code}, feedback)
-                    await rt.step(f"Deck has {actual} slides instead of {wanted.group(1)}, rebuilding", stage="verify")
-                    continue
-                rt.board.problems.append(f"The deck has {actual} slides, not the {wanted.group(1)} that were asked for.")
-            if res.ok and made:
-                rt.board.built += [f for f in files if f and f not in rt.board.built]
-                for f in made:
-                    rt.board.deliveries.append(await asyncio.to_thread(describe_file, rt.project_id, f))
-                return Handoff(True, f"Created {', '.join(made)}.")
-            last_error = (data.get("stderr") or res.error or f"the program ran but saved no {ext} file")[-700:]
-            feedback = json.dumps({"exit_code": data.get("exit_code"), "error": last_error, "fix": f"Rewrite the complete program so it saves a {ext} file."})
-            messages += tool_turns("run_python", {"code": code}, feedback)
-            if attempt < 2:
-                await rt.step(f"Build failed, retrying (attempt {attempt + 2} of 3)", stage="verify")
-        rt.board.problems.append(f"The {ext} file could not be created: {last_error[:300]}")
-        return Handoff(False, f"Could not create the {ext} file.")
+                    await rt.step(f"Rewriting slide {number} of {count}", stage="verify")
+            else:
+                rt.board.problems.append(f"Slide {number} of {count} could not be validated.")
+                return Handoff(False, "Could not validate the slide outline.")
+        figures = [f for f in [*rt.board.built, *rt.board.attachments] if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+        figures = list(dict.fromkeys(figures))[:count]
+        res = await rt.execute("run_python", {"code": presentation_program(path, slides, figures), "output_type": "presentation",
+                                             "output_path": path, "slide_count": count, "inputs": figures})
+        if not res.ok or path not in (res.data or {}).get("files", []):
+            rt.board.problems.append(f"The PowerPoint could not be created: {res.error or 'the requested deck is missing'}")
+            return Handoff(False, "Could not create the PowerPoint.")
+        rt.board.built.append(path)
+        rt.board.deliveries.append(await asyncio.to_thread(describe_file, rt.project_id, path))
+        return Handoff(True, f"Created {path} with {count} slides.")
 
     async def _file(self, rt: Runtime, task: str) -> Handoff:
         """Text files: prefill the native file-creation call so the file is really written."""
@@ -254,11 +322,12 @@ class BuildAgent:
         last_error = ""
         for attempt in range(2):
             out = await rt.llm(messages, max_new_tokens=settings.llm_max_new_tokens, temperature=0.2, tools=rt.schemas(tool), prefill=prefill)
-            calls = parse_tool_calls(out)
-            args = dict(calls[0].arguments) if calls else {}
-            if not args.get("path") or not args.get("content"):
-                last_error = "no file content was produced"
+            parsed = parse_prefilled_call(out, tool)
+            if parsed.get("path") != path or not parsed.get("content"):
+                last_error = "The model did not return a complete response for the requested path."
+                messages += tool_turns(tool, {"path": path}, json.dumps({"error": last_error, "fix": "Return the full file content and close the tool call."}))
                 continue
+            args = {"path": path, "content": parsed["content"]}
             if edit:
                 args["overwrite"] = True
             res = await rt.execute(tool, args)

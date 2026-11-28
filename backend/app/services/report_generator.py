@@ -86,6 +86,8 @@ async def write_report(
         body = f"# {title}\n\n{body}"
     # drop any model-written references section; ours is authoritative
     body = re.split(r"\n#{1,3}\s*(References|Bibliography|Sources)\s*\n", body, flags=re.I)[0].rstrip()
+    if not any(line.strip() and not line.lstrip().startswith("#") for line in body.splitlines()):
+        raise ValueError("KeawGPT returned a report without body content.")
     valid = {str(s["ref"]) for s in sources}
     body = re.sub(r"\[(\d+)\]", lambda m: m.group(0) if m.group(1) in valid else "", body)
     for f in figures:

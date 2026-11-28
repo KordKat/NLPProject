@@ -146,17 +146,18 @@ async def run_command(project_id: str, command: str, cwd: str = "", timeout: int
     return await asyncio.to_thread(_local_run, _shell_argv(command), full_cwd, timeout)
 
 
-async def run_python(project_id: str, code: str, timeout: int | None = None) -> ExecResult:
+async def run_python(project_id: str, code: str, timeout: int | None = None, *, cwd: Path | None = None) -> ExecResult:
     timeout = min(int(timeout or settings.sandbox_timeout), 600)
     ws = workspace_dir(project_id)
+    run_dir = cwd.resolve().relative_to(ws.resolve()) if cwd is not None else None
     if settings.sandbox_mode == "remote":
-        return await _remote("python", project_id, "", code, timeout)
+        return await _remote("python", project_id, run_dir.as_posix() if run_dir is not None else "", code, timeout)
     script_dir = ws / ".stemos" / "runs"
     script_dir.mkdir(parents=True, exist_ok=True)
     script = script_dir / f"run_{os.getpid()}_{abs(hash(code)) % 10**8}.py"
     script.write_text(code, encoding="utf-8")
     try:
-        return await asyncio.to_thread(_local_run, [sys.executable, "-X", "utf8", "-I", str(script)], ws, timeout)
+        return await asyncio.to_thread(_local_run, [sys.executable, "-X", "utf8", "-I", str(script)], cwd or ws, timeout)
     finally:
         try:
             script.unlink()

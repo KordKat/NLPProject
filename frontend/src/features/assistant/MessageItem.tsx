@@ -154,6 +154,7 @@ interface AnswerProps {
   artifacts: Artifact[];
   live?: boolean;
   status?: string;
+  outcome?: string;
   error?: string;
   feedback?: { rating: number; content: string };
   skills?: string[];
@@ -168,6 +169,8 @@ export function AssistantAnswer(p: AnswerProps) {
   return (
     <div className="space-y-3">
       <ActivityTimeline events={p.activity} live={p.live} status={p.status} defaultOpen={!!p.live} />
+      {p.outcome === "partial" && <p className="text-sm text-amber-300">Partially completed</p>}
+      {p.outcome === "failed" && p.text && <p className="text-sm text-rose-300">Run failed</p>}
       {p.text ? (
         <Markdown
           text={p.text}

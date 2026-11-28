@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 from app.agent.runtime import Handoff, Runtime, call_prefill
-from app.agent.tool_parser import parse_tool_calls
+from app.agent.tool_parser import parse_prefilled_call
 
 SAVE = re.compile(r"\b(remember|record|save|note)\b.*\b(that|relationship|relation)\b|\badd\b.*\b(knowledge )?graph\b", re.I)
 ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
@@ -20,13 +20,13 @@ class RecallAgent:
     async def _save(self, rt: Runtime, task: str) -> Handoff:
         out = await rt.llm(
             [{"role": "system", "content": _SAVE_SYSTEM}, {"role": "user", "content": task[:600]}],
-            max_new_tokens=90, tools=rt.schemas("upsert_knowledge_graph"), prefill=call_prefill("upsert_knowledge_graph", "concepts"),
+            max_new_tokens=140, tools=rt.schemas("upsert_knowledge_graph"), prefill=call_prefill("upsert_knowledge_graph", "concepts"),
         )
-        calls = parse_tool_calls(out)
-        if not calls:
+        args = parse_prefilled_call(out, "upsert_knowledge_graph")
+        if not args.get("concepts"):
             rt.board.problems.append("The relationship could not be understood, so nothing was saved.")
             return Handoff(False, "Nothing saved.")
-        args = {**calls[0].arguments, "evidence": task[:300]}
+        args["evidence"] = task[:300]
         res = await rt.execute("upsert_knowledge_graph", args)
         if not res.ok:
             rt.board.problems.append(res.error)

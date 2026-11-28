@@ -2,6 +2,7 @@
 through the blackboard (agent/runtime.py)."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.model_engine import get_engine
@@ -49,15 +50,30 @@ def previous_exchanges(project_id: str, n: int = 6) -> list[tuple[str, str]]:
     return [(p.content or "", c.content) for p, c in zip(msgs, msgs[1:]) if p.role == "user" and c.role == "assistant" and (c.content or "").strip()]
 
 
-def previous_turn(project_id: str) -> tuple[str, str, bool]:
-    """What "continue" refers to: (previous request, its answer, whether that turn finished its work)."""
+@dataclass
+class PreviousTurn:
+    request: str = ""
+    answer: str = ""
+    status: str = "failed"
+    attachments: list[str] = field(default_factory=list)
+
+
+def previous_turn(project_id: str) -> PreviousTurn:
+    """Find the latest prior request and the reply that belongs to it."""
     with db_session() as db:
         msgs = repo.recent_messages(db, project_id, 12)
     if msgs and msgs[-1].role == "user":
         msgs = msgs[:-1]
-    answer = next((m for m in reversed(msgs) if m.role == "assistant"), None)
-    request = next((m.content or "" for m in reversed(msgs) if m.role == "user"), "")
-    if answer is None:
-        return request, "", False
-    finished = (answer.meta or {}).get("status") == "completed" and bool((answer.content or "").strip()) and "> **Note:**" not in answer.content
-    return request, answer.content or "", finished
+    for i in range(len(msgs) - 1, -1, -1):
+        user = msgs[i]
+        if user.role != "user":
+            continue
+        reply = msgs[i + 1] if i + 1 < len(msgs) and msgs[i + 1].role == "assistant" else None
+        meta = (reply.meta or {}) if reply is not None else {}
+        answer = (reply.content or "") if reply is not None else ""
+        status = meta.get("status", "completed" if answer.strip() else "failed")
+        if status == "completed" and (not answer.strip() or ("outcomes" not in meta and "> **Note:**" in answer)):
+            status = "failed"
+        return PreviousTurn(meta.get("effective_request") or user.content or "", answer, status,
+                            list(meta.get("effective_attachments") or (user.meta or {}).get("attachments") or []))
+    return PreviousTurn()

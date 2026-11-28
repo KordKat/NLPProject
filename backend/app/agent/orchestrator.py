@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, Optional
 from app.agent import context_manager
 from app.agent.model_engine import GenerationCancelled, ModelUnavailableError, get_engine
 from app.agent.router import CONTINUATION, choose_next, needs_standalone, route_by_rules, standalone, write_task
-from app.agent.runtime import Blackboard, Runtime
+from app.agent.runtime import Blackboard, Handoff, Runtime
 from app.agent.subagents import ANSWER_AGENT, SUB_AGENTS
 from app.agent.subagents.curator import curate
 from app.config import get_settings
@@ -90,6 +90,7 @@ class Orchestrator:
         self.engine = get_engine()
         self.activity: list[dict[str, Any]] = []
         self.chain: list[str] = []
+        self.outcomes: dict[str, Handoff] = {}
         self.ctx = ToolContext(user_id=user_id, project_id=project.id, run_id=active.run_id, emit=self.emit, cancel_event=active.cancel_event)
         self.board = Blackboard(request=message)
         rounds = {"quick": 1, "deep": settings.research_max_rounds}.get(research_mode, min(2, settings.research_max_rounds))
@@ -105,6 +106,8 @@ class Orchestrator:
 
     async def execute_tool(self, name: str, args: dict[str, Any], announce_sources: bool = True) -> ToolResult:
         """Every tool call goes through here: permissions, approvals and UI events."""
+        if self.active.cancel_event.is_set():
+            raise GenerationCancelled("cancelled")
         spec = registry.get(name)
         call_id = uuid.uuid4().hex[:10]
         await self.emit({"type": "tool_call", "id": call_id, "name": name, "arguments": _safe_args(args)})
@@ -117,9 +120,13 @@ class Orchestrator:
             await self.emit({"type": "approval_required", "approval_id": pa.id, "tool": name, "arguments": _safe_args(args), "reason": reason})
             ok = await approvals.wait(pa)
             await self.emit({"type": "approval_resolved", "approval_id": pa.id, "approved": ok})
-            res = await registry.execute(self.ctx, name, args) if ok else ToolResult.failure(f"The user did not approve this action ({reason}). It was not executed.")
+            if self.active.cancel_event.is_set():
+                raise GenerationCancelled("cancelled")
+            res = await registry.execute(self.ctx, name, args) if ok else ToolResult.failure(f"The user did not approve this action ({reason}).")
         else:
             res = await registry.execute(self.ctx, name, args)
+        if self.active.cancel_event.is_set():
+            raise GenerationCancelled("cancelled")
         await self.emit({"type": "tool_result", "id": call_id, "name": name, "ok": res.ok, "error": res.error, "preview": res.preview(900)})
         if res.sources and announce_sources:
             await self.emit({"type": "retrieval_sources", "sources": [self._src_view(s) for s in res.sources]})
@@ -132,11 +139,6 @@ class Orchestrator:
     # ------------------------------------------------------------------ the main agent
     async def run(self) -> dict[str, Any]:
         await self.emit({"type": "run_started", "run_id": self.ctx.run_id})
-        if not self.engine.available:
-            msg = f"KeawGPT model is not available (status: {self.engine.status}). {self.engine.error}".strip()
-            await self.emit({"type": "error", "text": msg})
-            return {"text": "", "error": msg}
-
         rt = self.rt
         rt.preferences = await asyncio.to_thread(personalization.preferences_text, self.user_id, self.project)
         rt.project_line = await asyncio.to_thread(project_memory.project_line, self.project)
@@ -147,37 +149,53 @@ class Orchestrator:
 
         # "continue" means: carry on with the previous request
         request = self.message
-        intent = request  # what the user asked for decides the route; a rewrite only adds the topic
+        attachments = self.attachments
         if CONTINUATION.match(request):
-            previous, last_answer, finished = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
-            if previous and finished:  # extend the finished answer instead of repeating it
+            previous = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
+            if previous.request and previous.status == "completed":
                 await rt.step("Continuing the previous answer", stage="plan")
-                rt.history = [{"role": "user", "content": previous[:600]}, {"role": "assistant", "content": last_answer[-1500:]}]
-                _, text = await ANSWER_AGENT.run(rt, "Continue with new points your answer did not cover. Start with the first new point.", extends=last_answer, max_tokens=700)
-                return {"text": text, "plan": {"task_type": "answer", "tasks": []}}
-            if previous:  # the last run did not finish: do it again
-                request = intent = previous
+                rt.history = [{"role": "user", "content": previous.request[:600]}, {"role": "assistant", "content": previous.answer[-1500:]}]
+                answer, text = await ANSWER_AGENT.run(rt, "Continue with new points from the previous answer. Start with the first new point.", extends=previous.answer, max_tokens=700)
+                self.outcomes["answer"] = answer
+                return self._result(text)
+            if previous.status == "partial":
+                text = "The previous run completed part of the request. Which remaining part should I retry?"
+                await self.emit({"type": "text_delta", "text": text})
+                return self._result(text)
+            if previous.request and not CONTINUATION.match(previous.request):
+                request = previous.request
+                attachments = list(dict.fromkeys(previous.attachments + attachments))
                 await rt.step("Retrying the previous request", stage="plan")
         elif needs_standalone(request, bool(rt.history)):
-            prev_request, prev_answer, _ = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
-            if prev_answer.strip():
-                rewritten = await standalone(rt, request, prev_request, prev_answer)
-                if rewritten != request:
-                    await rt.step(f"Understood as: {rewritten[:160]}", stage="plan")
-                    request = rewritten
-                self.board.earlier = re.sub(r"(?m)^> \*\*Note:\*\*.*$", "", prev_answer).strip()
-        if self.attachments:
-            request += "\n\nAttached files: " + ", ".join(self.attachments)
+            previous = await asyncio.to_thread(context_manager.previous_turn, self.project.id)
+            if previous.answer.strip():
+                if self.engine.available:
+                    rewritten = await standalone(rt, request, previous.request, previous.answer)
+                    if rewritten != request:
+                        self.board.reference = rewritten
+                        await rt.step(f"Follow-up topic: {rewritten[:160]}", stage="plan")
+                self.board.earlier = re.sub(r"(?m)^> \*\*Note:\*\*.*$", "", previous.answer).strip()
         self.board.request = request
+        self.board.attachments = attachments
         self.ctx.shared["question"] = request
         await self._load_documents(request)
 
         await self.emit({"type": "status", "text": "Planning"})
-        route = route_by_rules(intent, has_history=bool(rt.history))
+        routing_text = request + ("\n\nAttached files: " + ", ".join(attachments) if attachments else "")
+        route = route_by_rules(routing_text, has_history=bool(rt.history))
         queue = list(route.agents)
-        allowed = ["research", "compute", "build"]
+        allowed = []
+        if any(rt.has_tool(name) for name in ("search_arxiv", "search_web", "search_images", "search_knowledge_graph")):
+            allowed.append("research")
+        if any(rt.has_tool(name) for name in ("eval", "run_python", "bash")):
+            allowed.append("compute")
         if self.research_mode == "off":
-            allowed.remove("research")
+            if "research" in allowed:
+                allowed.remove("research")
+            if "research" in queue and route.explicit_research:
+                self.board.research_attempted = True
+                self.board.problems.append("Research is disabled for this run.")
+                self.outcomes["research"] = Handoff(False, "Research is disabled.")
             queue = [a for a in queue if a != "research"]
         if self.research_mode == "deep" and not route.direct and "research" not in queue:
             queue.insert(1 if queue[:1] == ["recall"] else 0, "research")
@@ -192,14 +210,13 @@ class Orchestrator:
                 raise GenerationCancelled("cancelled")
             if queue:
                 agent = queue.pop(0)
-            elif route.direct or (done and not model_led):
+            elif route.direct or not self.engine.available or (self.outcomes and not model_led):
                 break
             else:
-                # a file is only built as a first step or when the rules saw a request for one
-                options = ["answer"] + [a for a in allowed if a not in self.chain and not (a == "build" and done)]
+                options = ["answer"] + [a for a in allowed if a not in self.outcomes]
                 if len(options) == 1:
                     break
-                agent, probs = await choose_next(self.engine, request, done, options)
+                agent, probs = await choose_next(self.engine, routing_text, done, options)
                 model_led = True
                 log.info("main agent chose %s: %s", agent, {k: round(v, 3) for k, v in probs.items()})
                 if agent == "answer":
@@ -207,30 +224,54 @@ class Orchestrator:
             sub = SUB_AGENTS[agent]
             task = await write_task(rt, agent, request, shared=bool(queue) or bool(done))
             await rt.step(f"{sub.label}: {task[:110]}", stage="agent", agent=agent)
-            handoff = await sub.run(rt, task)
+            problems_before = len(self.board.problems)
+            try:
+                handoff = await sub.run(rt, task)
+            except ModelUnavailableError as exc:
+                handoff = Handoff(False, str(exc))
+            if not handoff.ok and len(self.board.problems) == problems_before and not self.board.exact:
+                self.board.problems.append(handoff.note)
             self.chain.append(agent)
+            self.outcomes[agent] = handoff
             done.append((agent, ("Done. " if handoff.ok else "Failed. ") + handoff.note))
             await rt.step(f"{sub.label}: {handoff.note}", stage="agent" if handoff.ok else "verify", agent=agent)
 
-        await asyncio.to_thread(self._update_run, task_type=("+".join(self.chain) or "answer")[:30], plan={"agents": self.chain, "request": request[:500]},
-                                retrieval_rounds=self.board.rounds, queries=self.board.queries, evidence=json.loads(json.dumps(self.ctx.evidence, default=str)))
         await self.emit({"type": "plan", "task_type": "+".join(self.chain) or "answer", "main_question": request[:200], "subquestions": []})
         board = self.board
         verified_research = bool(board.brief) and set(self.chain) <= {"research", "compute"}
-        # a failed file is reported, never described: the writer would invent the file's contents
-        build_failed = "build" in self.chain and not board.deliveries
-        compute_failed = self.chain == ["compute"] and not board.computed and bool(board.problems)
-        # a plot is the answer: the writer would redraw it as text
-        plotted = self.chain == ["compute"] and any(f.lower().endswith((".png", ".jpg", ".jpeg", ".svg")) for f in board.built)
-        if board.exact or (self.chain[-1:] == ["build"] and board.deliveries) or verified_research or build_failed or compute_failed or plotted:
-            _, text = await ANSWER_AGENT.deliver(rt)
+        verified_compute = self.chain == ["compute"] and (board.compute_exact or bool(board.built))
+        if self.active.cancel_event.is_set():
+            raise GenerationCancelled("cancelled")
+        if board.exact or self.chain[-1:] == ["build"] or verified_research or verified_compute or (self.outcomes and board.problems):
+            answer, text = await ANSWER_AGENT.deliver(rt)
         else:
-            _, text = await ANSWER_AGENT.run(rt, request, max_tokens=700 if "compute" in self.chain else 0)
-        return {"text": text, "plan": {"task_type": "+".join(self.chain) or "answer", "tasks": [SUB_AGENTS[a].label for a in self.chain]}}
+            try:
+                answer, text = await ANSWER_AGENT.run(rt, request, max_tokens=700 if "compute" in self.chain else 0)
+            except ModelUnavailableError as exc:
+                answer, text = Handoff(False, str(exc)), ""
+                if self.outcomes:
+                    board.problems.append("KeawGPT could not write a summary of the available results.")
+                    _, text = await ANSWER_AGENT.deliver(rt)
+        self.outcomes["answer"] = answer
+        result = self._result(text)
+        await asyncio.to_thread(self._update_run, task_type=result["plan"]["task_type"][:30],
+                                plan={**result["plan"], "agents": self.chain, "request": request[:500], "outcomes": self._outcome_view()},
+                                retrieval_rounds=board.rounds, queries=board.queries, evidence=json.loads(json.dumps(self.ctx.evidence, default=str)))
+        return result
+
+    def _outcome_view(self) -> dict[str, dict[str, Any]]:
+        return {name: {"ok": outcome.ok, "note": outcome.note} for name, outcome in self.outcomes.items()}
+
+    def _result(self, text: str) -> dict[str, Any]:
+        failed = [outcome.note for outcome in self.outcomes.values() if not outcome.ok]
+        delivered = bool(self.board.brief or self.board.computed or self.board.deliveries or self.board.built or self.board.memory)
+        status = "completed" if not failed else "partial" if delivered else "failed"
+        return {"text": text, "status": status, "error": " ".join(failed),
+                "plan": {"task_type": "+".join(self.chain) or "answer", "tasks": [SUB_AGENTS[a].label for a in self.chain]}}
 
     async def _load_documents(self, request: str) -> None:
         """Attached or named project documents go on the blackboard (tabular data stays with Compute)."""
-        names = list(self.attachments) + _NAMED_DOC.findall(request)
+        names = list(self.board.attachments) + _NAMED_DOC.findall(request)
         for name in list(dict.fromkeys(names))[:3]:
             try:
                 full, rel = resolve_in_workspace(self.project.id, name)
@@ -277,6 +318,9 @@ class Orchestrator:
         return {
             "run_id": self.ctx.run_id,
             "status": status,
+            "outcomes": self._outcome_view(),
+            "effective_request": self.board.request,
+            "effective_attachments": self.board.attachments,
             "task_type": (plan or {}).get("task_type"),
             "activity": self.activity[-200:],
             "sources": [{"ref": s["ref"], "title": s.get("title"), "url": s.get("url"), "kind": s.get("source_type"), "paper_id": s.get("paper_id"), "published": (s.get("meta") or {}).get("published", ""), "authors": (s.get("meta") or {}).get("authors", [])[:4], "via": (s.get("meta") or {}).get("via", "")} for s in self._kept_sources()],
@@ -303,23 +347,24 @@ async def execute_run(*, project: Project, user_id: str, message: str, research_
     try:
         result = await orch.run()
         text, plan = result.get("text", ""), result.get("plan")
-        if result.get("error"):
-            status, error = "failed", result["error"]
+        if active.cancel_event.is_set():
+            raise GenerationCancelled("cancelled")
+        status, error = result["status"], result["error"]
     except GenerationCancelled:
         status, error = "cancelled", "Cancelled by user"
         await orch.emit({"type": "cancelled", "text": "Run cancelled"})
     except ModelUnavailableError as exc:
         status, error = "failed", str(exc)
-        await orch.emit({"type": "error", "text": str(exc)})
     except Exception as exc:
         log.exception("run failed")
         status, error = "failed", f"{type(exc).__name__}: {exc}"
-        await orch.emit({"type": "error", "text": f"An error occurred: {error}"})
 
     await asyncio.to_thread(orch._finish_run, status, error, text)
     meta = orch.message_meta(plan, status)
     if error:
         meta["error"] = error
+    if status == "failed" and error and not text:
+        await orch.emit({"type": "error", "text": error})
     if text or orch.ctx.artifacts or status != "completed":
         msg = await asyncio.to_thread(_save_assistant, project.id, text, meta)
         await orch.emit({"type": "done", "text": text, "message_id": msg, "run_id": orch.ctx.run_id, "status": status, "sources": meta["sources"], "artifacts": meta["artifacts"]})

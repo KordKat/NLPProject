@@ -1,7 +1,6 @@
-"""Research agent: queries → retrieval → relevant facts → ONE cited paragraph.
+"""Research agent: search queries, retrieval and cited source excerpts.
 
-The only model calls are the query writer and a single summary at the end. Relevance filtering,
-gap detection and citation are done with embeddings, so extra retrieval rounds cost almost nothing.
+The model drafts queries and a retrieval hint. The answer uses the retrieved text.
 """
 from __future__ import annotations
 
@@ -11,14 +10,15 @@ import logging
 import re
 from typing import Any
 
-from app.agent.prompts import EXPECTED_SHOTS, EXPECTED_SYSTEM, QUERY_SHOTS, QUERY_SYSTEM, SUMMARY_SHOT_IN, SUMMARY_SHOT_OUT, SUMMARY_SYSTEM
+from app.agent.prompts import EXPECTED_SHOTS, EXPECTED_SYSTEM, QUERY_SHOTS, QUERY_SYSTEM
 from app.agent.runtime import Handoff, Runtime
 from app.agent.tool_parser import extract_json
 from app.config import get_settings
 from app.knowledge_graph.graph_retriever import format_for_context
 from app.knowledge_graph.neo4j_client import get_graph
 from app.retrieval import reranking
-from app.retrieval.evidence import Fact, attribute_paragraph, extractive_paragraph, select_facts, states_no_answer, uncovered
+from app.retrieval.evidence import Fact, extractive_paragraph, select_facts, states_no_answer, uncovered
+from app.retrieval.faiss_search import get_arxiv_index
 from app.retrieval.retrieval_pipeline import run_round
 
 log = logging.getLogger("stemos.research")
@@ -26,6 +26,8 @@ settings = get_settings()
 
 RECENT = re.compile(r"\b(latest|newest|recent(ly)?|currently|today|this (year|month|week)|news|20[2-3]\d|approved|regulation|price|release[ds]?|won|winner)\b", re.I)
 IMAGES = re.compile(r"\b(photos?|pictures?|images?)\s+of\b|\bshow me\b.*\b(photo|picture|image|diagram)", re.I)
+WEB = re.compile(r"\b(web search|google|browse)\b|\b(?:search|find|look up|check)\b[^.?!]{0,50}\b(?:web|internet|online)\b|\b(?:on|from) the web\b", re.I)
+ARXIV = re.compile(r"\barxiv\b", re.I)
 _QSTOP = {"the", "and", "for", "with", "from", "into", "that", "this", "what", "how", "why", "are", "does", "about", "latest", "recent", "research", "overview", "using", "based"}
 
 
@@ -84,8 +86,10 @@ class ResearchAgent:
     def _route(self, rt: Runtime, queries: list[str], task: str, first: bool) -> list[dict[str, str]]:
         """Send each query where it can actually be answered."""
         plan: list[dict[str, str]] = []
-        use_arxiv = settings.arxiv_search_enabled and rt.has_tool("search_arxiv")
-        use_web = rt.has_tool("search_web") and (not use_arxiv or bool(RECENT.search(task)))
+        web_requested = bool(WEB.search(task))
+        arxiv_requested = bool(ARXIV.search(task))
+        use_arxiv = settings.arxiv_search_enabled and rt.has_tool("search_arxiv") and get_arxiv_index().available and (arxiv_requested or not web_requested)
+        use_web = rt.has_tool("search_web") and (web_requested or not arxiv_requested and (not use_arxiv or bool(RECENT.search(task))))
         if use_arxiv:
             plan += [{"tool": "arxiv", "query": q} for q in queries]
         if use_web:
@@ -93,25 +97,6 @@ class ResearchAgent:
         if first and rt.has_tool("search_knowledge_graph") and get_graph().available:
             plan.append({"tool": "graph", "query": keywords(queries[0], 4)})
         return plan
-
-    async def _summarize(self, rt: Runtime, task: str, facts: list[Fact]) -> str:
-        bullet = "\n".join(f"- {f.text}" for f in facts)
-        out = await rt.llm(
-            [
-                {"role": "system", "content": SUMMARY_SYSTEM},
-                {"role": "user", "content": SUMMARY_SHOT_IN},
-                {"role": "assistant", "content": SUMMARY_SHOT_OUT},
-                {"role": "user", "content": f"QUESTION: {task[:400]}\nFACTS:\n{bullet}"},
-            ],
-            max_new_tokens=280,
-            temperature=0.2,
-        )
-        draft = out.split("\n\n")[0]
-        # judged on what survives verification, before any source is marked as cited
-        probe = attribute_paragraph(draft, facts, lambda _: 0) or extractive_paragraph(facts, lambda _: 0)
-        if states_no_answer(draft) or states_no_answer(probe, task):
-            return ""
-        return attribute_paragraph(draft, facts, rt.cite) or extractive_paragraph(facts, rt.cite)
 
     def _store_evidence(self, rt: Runtime, facts: list[Fact]) -> None:
         """Per-source records used by the report writer, project memory and the graph curator."""
@@ -132,6 +117,10 @@ class ResearchAgent:
 
     async def run(self, rt: Runtime, task: str) -> Handoff:
         board = rt.board
+        board.research_attempted = True
+        request = task
+        if board.reference:
+            task += f"\n\nFollow-up topic: {board.reference}"
         failed: list[str] = []
         if IMAGES.search(task) and rt.has_tool("search_images"):
             res = await rt.execute("search_images", {"query": keywords(task, 6), "limit": 3})
@@ -149,9 +138,9 @@ class ResearchAgent:
         for rnd in range(1, rt.research_rounds + 1):
             if rt.ctx.cancel_event.is_set() or not queries:
                 break
-            plan = self._route(rt, queries, task, first=rnd == 1)
+            plan = self._route(rt, queries, request, first=rnd == 1)
             if not plan:
-                board.problems.append("No search tool is enabled for this project.")
+                board.problems.append("The requested search service is disabled or unavailable.")
                 break
             board.rounds += 1
             board.queries += [{**q, "round": rnd} for q in plan]
@@ -182,14 +171,14 @@ class ResearchAgent:
         if not pool:
             msg = "No relevant evidence was found" + (" (a search service failed)" if failed else "")
             # research runs when the answer depends on sources: the model would invent the specifics
-            board.exact = f"{msg}, so I can't give a reliable answer to this."
+            board.problems.append(f"{msg}.")
             return Handoff(False, msg)
 
-        await rt.step(f"Writing one cited paragraph from {len(pool)} facts", stage="filter")
-        paragraph = await self._summarize(rt, task, pool)
-        if not paragraph:
-            board.exact = "I searched, but the sources I found do not state this, so I can't give a reliable answer."
+        await rt.step(f"Selecting cited excerpts from {len(pool)} facts", stage="filter")
+        if states_no_answer(extractive_paragraph(pool, lambda _: 0), request):
+            board.problems.append("The retrieved sources did not provide the requested answer.")
             return Handoff(False, "The sources do not answer this.")
+        paragraph = extractive_paragraph(pool, rt.cite)
         board.facts = pool
         board.brief = f"{board.brief} {paragraph}".strip()
         self._store_evidence(rt, pool)

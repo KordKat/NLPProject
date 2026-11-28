@@ -3,8 +3,7 @@
 Measured behaviour these prompts are built around:
 * With reasoning off it almost never starts a tool call (3-7 of 26), but it reliably completes one
   that is already started. So decisions and tool calls are PREFILLED rather than requested.
-* It does not write [n] citations and drifts into "Source 2 says…". So it receives plain facts and
-  citations are attached afterwards by code (retrieval/evidence.py).
+* Research uses cited source excerpts with citations attached by code.
 * Few-shot examples work best as real turns for fixed output formats, and as GOOD/BAD contrast lines
   for decisions. Each prompt states only what that one agent has to know.
 """
@@ -21,14 +20,10 @@ GOOD "What is 3^20?" -> compute (never calculate in your head)
 GOOD "Plot a Gaussian" -> compute
 GOOD "Latest results on room-temperature superconductors" -> research (recent, you cannot know it)
 GOOD "What F1 score did the BERT paper report?" -> research (a specific published number)
-GOOD "Make slides about enzymes" -> build
 BAD  "Explain what entropy is" -> research (wastes a search)
 BAD  "What is 3^20?" -> answer (guesses a number)
-BAD  "Make slides about enzymes" -> answer (describes slides but creates no file)
 
 After an agent reports: if the request still needs another output, call that agent; otherwise call answer."""
-
-MAIN_TASK_SYSTEM = "Write one short instruction with ONLY the part of the request this agent handles. Keep the topic and key terms. research finds facts, compute calculates and plots."
 
 STANDALONE_SYSTEM = """Rewrite the LATEST request so it can be understood without the conversation: replace words like "this", "it" and "that" with what they refer to.
 Keep every instruction, number and file type. Output only the rewritten request."""
@@ -38,11 +33,6 @@ STANDALONE_SHOTS: list[tuple[str, str, str]] = [
      "Make 4 slides summarizing this", "Make 4 slides summarizing graph neural networks and how they pass messages between neighbouring nodes"),
     ("User: What was the first paper we found?\nAssistant: The first source saved in this project is **Attention Is All You Need**.",
      "Write a short report on it", "Write a short report on the paper Attention Is All You Need"),
-]
-
-TASK_SHOTS: list[tuple[str, str, str]] = [
-    ("research", "Research enzyme kinetics and plot the Michaelis-Menten curve for Km = 2", "Find how enzyme kinetics and the Michaelis-Menten model work"),
-    ("compute", "Research enzyme kinetics and plot the Michaelis-Menten curve for Km = 2", "Plot the Michaelis-Menten curve for Km = 2"),
 ]
 
 # ---------------------------------------------------------------- research agent
@@ -73,20 +63,6 @@ EXPECTED_SHOTS: list[tuple[str, str]] = [
     ("What is the boiling point of ethanol?", "Ethanol boils at 78.37 °C at atmospheric pressure."),
 ]
 
-SUMMARY_SYSTEM = """Rewrite the FACTS into ONE flowing paragraph of 3-6 sentences that answers the QUESTION.
-Use only these facts and keep their numbers exact. Merge facts that say the same thing. Leave out facts that do not help.
-BAD: "Source 1 says gradients shrink. Source 2 is about LSTM." (goes source by source)
-BAD: "RNNs also suffer from attention bottlenecks." (not in the facts)"""
-
-SUMMARY_SHOT_IN = """QUESTION: Why do RNNs struggle with long sequences?
-FACTS:
-- Gradients shrink exponentially with the number of time steps in vanilla RNNs.
-- We measure rainfall in northern Thailand.
-- LSTM gates keep a constant error flow over more than 1000 steps.
-- Vanishing gradients prevent learning dependencies beyond about 10 steps."""
-
-SUMMARY_SHOT_OUT = "RNNs struggle with long sequences because their gradients shrink exponentially with the number of time steps. This vanishing gradient prevents them from learning dependencies beyond about 10 steps. LSTM gates counter the problem by keeping a constant error flow over more than 1000 steps."
-
 # ---------------------------------------------------------------- compute agent
 
 COMPUTE_SYSTEM = """You solve the task by writing one complete Python program. numpy, scipy, sympy, pandas and matplotlib are installed.
@@ -95,11 +71,6 @@ GOOD: x = np.linalg.eigvalsh(A); print("eigenvalues:", x)
 BAD: print("eigenvalues: 1.38, 3.62")  (a result typed by hand instead of computed)"""
 
 # ---------------------------------------------------------------- build agent
-
-BUILD_SCRIPT_SYSTEM = """You create the requested file by writing one complete Python program that saves it in the workspace.
-Use the CONTENT given below; never leave placeholder text. print() the saved path.
-The file is about the TASK's topic only. BAD: a deck about diffusion models because the instructions use it as an example.
-Insert an image only if the task lists it under "Figures you must insert". BAD: add_picture("figures/diagram.png") for a file that does not exist."""
 
 BUILD_FILE_SYSTEM = """You create the requested file. Write its complete content.
 BAD content: "TODO", "..." or a description of what the file should contain."""

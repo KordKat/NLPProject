@@ -76,8 +76,8 @@ Notes
   instance guarded by a generation lock; cancellation via a stopping criterion.
 * Uses the model's real chat template (`# SYSTEM / # USER / # ASSISTANT / # TOOL`, generation
   prompt ending in `<reasoning>`; `enable_reasoning` toggles it).
-* Tool calls use the template's native format `<tools_call><function=…><parameter=…>…`; the parser
-  handles multiple calls, missing closing tags and tags split across streamed tokens.
+* Tool calls use the template's native format. Generated actions require one complete call for the
+  tool selected by the harness.
 * Private reasoning is never streamed to the browser; the UI shows research activity instead.
 
 ### Main agent and sub-agents (`backend/app/agent/`)
@@ -92,12 +92,17 @@ next and moves data between them on a shared blackboard (`runtime.py`).
   searches again only for uncovered queries (`RESEARCH_MAX_ROUNDS`, default 3).
 * **Compute** runs real code for math, data and plots. **Build** creates slides, reports and files.
   **Recall** reads project memory. **Answer** is the only agent that talks to the user.
+* Plot and PowerPoint jobs write to a temporary workspace directory. The harness opens the output
+  and checks the requested filename and slide count before publishing. KeawGPT drafts one
+  title and bullet list at a time, and application code renders the deck.
+* The run records the outcome of each stage and reports partial completion when a request has
+  both delivered results and failed stages.
 * **Graph Curator** runs in the background after the answer and writes only relations whose two
   concepts appear together in one retrieved fact.
 
 ### Evidence and citations (`backend/app/retrieval/evidence.py`)
-KeawGPT rewrites the selected facts into one paragraph without source labels. Code then matches each
-sentence to its source, attaches `[n]`, and drops sentences that are unsupported or change a number.
+Research answers cite excerpts from the retrieved sources. For prose written by the Answer agent,
+the harness attaches citations to matching source sentences.
 
 ### Tools (`backend/app/tools/`)
 `search_arxiv`, `search_web`, `search_images`, `search_knowledge_graph`, `upsert_knowledge_graph`,

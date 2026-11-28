@@ -6,6 +6,7 @@ export interface Draft {
   userText: string;
   text: string;
   status: string;
+  outcome?: string;
   activity: ActivityEvent[];
   sources: SourceRef[];
   artifacts: Artifact[];
@@ -117,7 +118,12 @@ export function useAssistantRun(projectId: string | undefined, cb: Callbacks) {
         setDraft((d) => (d ? { ...d, cancelled: true, status: "Cancelled" } : d));
         break;
       case "done":
-        setDraft((d) => (d ? { ...d, status: "Done" } : d));
+        setDraft((d) => d ? {
+          ...d,
+          text: ev.text ?? d.text,
+          status: ev.status === "completed" ? "Done" : ev.status === "partial" ? "Partially completed" : ev.status === "cancelled" ? "Cancelled" : "Failed",
+          outcome: ev.status,
+        } : d);
         break;
     }
   }, []);

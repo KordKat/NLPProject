@@ -42,25 +42,33 @@ class Blackboard:
     facts: list[Fact] = field(default_factory=list)
     graph_notes: str = ""
     computed: list[str] = field(default_factory=list)
+    compute_exact: bool = False
     built: list[str] = field(default_factory=list)
     deliveries: list[str] = field(default_factory=list)  # verified descriptions of finished files
     exact: str = ""  # a complete answer read directly from stored data
     earlier: str = ""  # the previous answer, when this request refers to it ("summarize this")
+    reference: str = ""  # resolved topic of a follow-up
+    attachments: list[str] = field(default_factory=list)
     memory: str = ""
     documents: list[str] = field(default_factory=list)  # attached / named project files
     problems: list[str] = field(default_factory=list)
     queries: list[dict[str, Any]] = field(default_factory=list)
     rounds: int = 0
+    research_attempted: bool = False
     cited: list[str] = field(default_factory=list)  # source keys, in citation order
 
     def for_compute(self) -> str:
         parts = [f"Earlier answer the request refers to:\n{self.earlier[:1500]}"] if self.earlier else []
+        if self.reference:
+            parts.append(f"Follow-up topic: {self.reference}")
         if self.brief:
             parts.append(f"Research notes:\n{self.brief}")
         return "\n\n".join(parts)
 
     def for_build(self) -> str:
         parts = list(self.documents)
+        if self.reference:
+            parts.append(f"Follow-up topic: {self.reference}")
         if self.earlier:
             parts.append(f"Earlier answer the request refers to (use it as the content):\n{self.earlier[:2000]}")
         if self.memory:
@@ -73,6 +81,8 @@ class Blackboard:
 
     def for_answer(self) -> str:
         parts = list(self.documents)
+        if self.reference:
+            parts.append(f"Follow-up topic: {self.reference}")
         if self.memory:
             parts.append(f"From this project's memory:\n{self.memory}")
         if self.brief:
@@ -149,9 +159,6 @@ class Runtime:
             for i, k in enumerate(self.board.cited + rest, 1):
                 sources[k]["ref"] = i
         return sources[key]["ref"]
-
-    def cited_numbers(self) -> set[int]:
-        return {self.ctx.sources[k]["ref"] for k in self.board.cited if k in self.ctx.sources}
 
     def cited_sources(self) -> list[dict[str, Any]]:
         return [self.ctx.sources[k] for k in self.board.cited if k in self.ctx.sources]

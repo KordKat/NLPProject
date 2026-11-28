@@ -5,7 +5,7 @@ import asyncio
 import difflib
 import re
 
-from app.agent.model_engine import GenerationParams, strip_turn_markers
+from app.agent.model_engine import GenerationParams, ModelUnavailableError, strip_turn_markers
 from app.agent.prompts import WRITER_SYSTEM
 from app.agent.runtime import Handoff, Runtime, tool_turns
 from app.agent.tool_parser import split_reasoning, strip_tool_markup, visible_answer
@@ -101,6 +101,8 @@ class AnswerAgent:
         return messages
 
     async def _stream(self, rt: Runtime, messages: list[dict[str, str]], max_tokens: int = 0) -> tuple[str, str]:
+        if not rt.engine.available:
+            raise ModelUnavailableError(f"KeawGPT is unavailable ({rt.engine.status}). {rt.engine.error}".strip())
         params = GenerationParams(max_new_tokens=max_tokens or settings.llm_max_new_tokens, temperature=settings.llm_temperature, top_p=settings.llm_top_p)
         prompt, n = rt.engine.fit_prompt(messages, None, False, params.max_new_tokens)
         await rt.emit({"type": "status", "text": "Writing answer", "prompt_tokens": n})
@@ -132,7 +134,7 @@ class AnswerAgent:
         parts += [f"> **Note:** {p}" for p in board.problems]
         text = "\n\n".join(parts)
         await rt.emit({"type": "text_delta", "text": text})
-        return Handoff(True, "Delivered."), text
+        return Handoff(bool(text), "Delivered." if text else "No results to deliver."), text
 
     async def run(self, rt: Runtime, user_content: str, extends: str = "", max_tokens: int = 0) -> tuple[Handoff, str]:
         """`extends` is the answer being continued: anything restating it is removed."""
@@ -147,8 +149,11 @@ class AnswerAgent:
             await rt.step("Answer repeated an earlier reply, rewriting", stage="verify")
             await rt.emit({"type": "clear_answer"})
             messages += [{"role": "assistant", "content": text[:1200]}, {"role": "user", "content": f"That repeats an earlier answer. Answer this request instead: {rt.board.request[:500]}"}]
-            text, sent = await self._stream(rt, messages)
+            text, sent = await self._stream(rt, messages, max_tokens)
         text = tidy_answer(text)
+        if not text:
+            await rt.emit({"type": "replace_answer", "text": ""})
+            return Handoff(False, "KeawGPT returned an empty answer."), ""
         # figures are attached below the answer: drop inline copies of them
         text = re.sub(r"!\[[^\]]*\]\(([^)\s]+)\)\s*", lambda m: "" if any(m.group(1).endswith(f) or f.endswith(m.group(1)) for f in rt.board.built) else m.group(0), text).strip()
         missing = await asyncio.to_thread(missing_files, rt, text)
@@ -156,8 +161,7 @@ class AnswerAgent:
             text += f"\n\n> **Note:** these files were mentioned but do not exist: {', '.join(missing)}."
         for problem in rt.board.problems:  # failures are always reported, whatever the model wrote
             text += f"\n\n> **Note:** {problem}"
-        final = await asyncio.to_thread(attribute_answer, text, rt.board.facts, rt.cite, rt.cited_numbers() | {0})
-        final = final.replace("[0]", "").strip()
+        final = (await asyncio.to_thread(attribute_answer, text, rt.board.facts, rt.cite)).strip()
         if final != sent.strip():
             await rt.emit({"type": "replace_answer", "text": final})
         return Handoff(True, "Answer delivered."), final

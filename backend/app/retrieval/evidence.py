@@ -1,11 +1,4 @@
-"""From retrieved documents to verifiable facts, and from generated text back to sources.
-
-KeawGPT rewrites well but does not cite reliably, so the two jobs are split:
-1. `select_facts`  - pick the sentences most relevant to the question (embeddings, no LLM).
-2. the model rewrites those facts into one paragraph, without seeing any source labels.
-3. `attribute`     - match every generated sentence to the fact that supports it, attach [n], and in
-                     strict mode drop sentences no source supports (including changed numbers).
-"""
+"""Rank retrieved evidence and attach citations to exact source excerpts."""
 from __future__ import annotations
 
 import re
@@ -54,14 +47,10 @@ _NO_ANSWER = re.compile(
     r"|\b(facts?|text|sources?)\b[^.]{0,30}\b(do not|does not|don't|doesn't)\b[^.]{0,20}\b(state|mention|specify|provide|contain|say)\b",
     re.I,
 )
-_META = re.compile(r"\b(provided|given|above|listed) (facts?|text|information|context)\b|\bthe facts\b", re.I)
 # a paragraph cannot open on a word that refers to a sentence that is not there
 _DANGLING = re.compile(r"^(Their|They|It|Its|This|These|Those|Such)\b")
 _FIRST_PERSON = re.compile(r"\b(we|our)\b", re.I)
-_CONNECTOR = re.compile(r"^(However|Additionally|Moreover|Furthermore|In addition|Also|Thus|Therefore|Consequently),?\s+(\w)")
 
-STRICT_SIM = 0.52  # a summary sentence must be this close to a fact to be kept
-SOFT_SIM = 0.62  # an answer sentence must be this close to a fact to receive a citation
 
 
 @dataclass
@@ -181,14 +170,6 @@ def uncovered(queries: list[str], facts: list[Fact], threshold: float = 0.42) ->
     return [q for q, row in zip(queries, sims) if float(row.max()) < threshold]
 
 
-def _numbers_supported(sentence: str, fact_text: str) -> bool:
-    """The sentence's figures, and any claim that something is the latest, must be in the source."""
-    have = set(_NUM.findall(fact_text))
-    if _CURRENCY.search(sentence) and not _CURRENCY.search(fact_text):
-        return False
-    return all(n in have for n in _NUM.findall(sentence))
-
-
 def _with_citation(sentence: str, numbers: list[int]) -> str:
     tag = "".join(f"[{n}]" for n in numbers)
     if sentence[-1:] in ".!?":
@@ -196,60 +177,15 @@ def _with_citation(sentence: str, numbers: list[int]) -> str:
     return f"{sentence} {tag}"
 
 
-def _best_keys(row: np.ndarray, facts: list[Fact], threshold: float) -> list[int]:
-    """Indexes of the best fact plus a second one from another source when nearly as close."""
-    order = np.argsort(-row).tolist()
-    best = order[0]
-    if row[best] < threshold:
-        return []
-    out = [best]
-    for j in order[1:]:
-        if row[j] < max(threshold, row[best] - 0.05):
-            break
-        if facts[j].source_key != facts[best].source_key:
-            out.append(j)
-            break
-    return out
-
-
-def attribute_paragraph(paragraph: str, facts: list[Fact], cite: Callable[[str], int]) -> str:
-    """Strict: keep only sentences a fact supports, each ending with its [n]. If too little survives
-    for the amount of evidence, the best unused facts are added verbatim."""
-    sentences = [s for s in split_sentences(_CITE.sub("", paragraph)) if len(s) > 15 and not _META.search(s) and not _NO_ANSWER.search(s)]
-    if not sentences or not facts:
-        return ""
-    fact_vecs = np.vstack([f.vec for f in facts])
-    sentence_vecs = embed(sentences)
-    kept: list[tuple[str, np.ndarray, list[int]]] = []
-    for sentence, vec, row in zip(sentences, sentence_vecs, sentence_vecs @ fact_vecs.T):
-        hits = _best_keys(row, facts, STRICT_SIM)
-        if hits and _numbers_supported(sentence, " ".join(facts[j].text for j in hits)):
-            kept.append((sentence, vec, hits))
-    while kept and _DANGLING.match(kept[0][0]):
-        kept.pop(0)
-    wanted = min(3, len(facts) // 2)
-    for j, fact in enumerate(facts):
-        if len(kept) >= wanted:
-            break
-        if _FIRST_PERSON.search(fact.text):  # "we examine…" reads wrongly when quoted as the answer
-            continue
-        if (kept or not _DANGLING.match(fact.text)) and not any(j in hits or float(vec @ fact.vec) > 0.8 for _, vec, hits in kept):
-            kept.append((fact.text, fact.vec, [j]))
-    if kept:
-        first = _CONNECTOR.sub(lambda m: m.group(2).upper(), kept[0][0])
-        kept[0] = (first, kept[0][1], kept[0][2])
-    return " ".join(_with_citation(s, sorted({cite(facts[j].source_key) for j in hits})) for s, _, hits in kept)
-
-
 def extractive_paragraph(facts: list[Fact], cite: Callable[[str], int], n: int = 3) -> str:
-    """Fallback when the rewrite is unusable: the top facts verbatim, cited."""
+    """Cite the top source excerpts as written."""
     chosen = [f for f in facts if not _DANGLING.match(f.text) and not _FIRST_PERSON.search(f.text)][:n] or facts[:n]
     return " ".join(_with_citation(f.text, [cite(f.source_key)]) for f in chosen)
 
 
 _SKIP_LINE = re.compile(r"^\s*(#|\||```|\$\$|>)")
 _PROTECTED = re.compile(r"(```.*?```|`[^`\n]*`|\$\$.*?\$\$|\$[^$\n]*\$)", re.S)
-_FAKE_CITE = re.compile(r"\s*(?<![\w\])$])\[(\d{1,3})\](\([^)\s]*\))?")
+_FAKE_CITE = re.compile(r"\s*(?<![\w)$])\[(\d{1,3})\](\([^)\s]*\))?")
 
 
 def clean_citations(text: str, valid: set[int]) -> str:
@@ -261,13 +197,18 @@ def clean_citations(text: str, valid: set[int]) -> str:
 
 
 
-def attribute_answer(text: str, facts: list[Fact], cite: Callable[[str], int], valid: set[int]) -> str:
-    """Soft: never removes content. Drops [n] that do not exist and adds [n] to prose sentences a
-    fact clearly supports; sentences from the model's own knowledge stay uncited."""
-    text = clean_citations(text, valid)
+def attribute_answer(text: str, facts: list[Fact], cite: Callable[[str], int]) -> str:
+    """Reattach citations only to matching source sentences outside code and math."""
+    text = clean_citations(text, set())
     if not facts:
         return text
-    fact_vecs = np.vstack([f.vec for f in facts])
+
+    def normalized(sentence: str) -> str:
+        return " ".join(sentence.split()).rstrip(".!?")
+
+    sources: dict[str, set[str]] = {}
+    for fact in facts:
+        sources.setdefault(normalized(fact.text), set()).add(fact.source_key)
     out: list[str] = []
     in_block = False
     for line in text.split("\n"):
@@ -275,17 +216,16 @@ def attribute_answer(text: str, facts: list[Fact], cite: Callable[[str], int], v
             in_block = not in_block if line.count("```") + line.count("$$") == 1 else in_block
             out.append(line)
             continue
-        if in_block or _SKIP_LINE.match(line) or len(line) < 40:
+        if in_block or _SKIP_LINE.match(line):
             out.append(line)
             continue
-        indent = line[: len(line) - len(line.lstrip())]
-        parts = split_sentences(line)
-        need = [i for i, s in enumerate(parts) if len(s) > 30 and not _CITE.search(s)]
-        if need:
-            sims = embed([parts[i] for i in need]) @ fact_vecs.T
-            for i, row in zip(need, sims):
-                hits = _best_keys(row, facts, SOFT_SIM)
-                if hits and _numbers_supported(parts[i], " ".join(facts[j].text for j in hits)):
-                    parts[i] = _with_citation(parts[i], sorted({cite(facts[j].source_key) for j in hits}))
-        out.append(indent + " ".join(parts))
+        sentences = split_sentences(line)
+        matched = [sources.get(normalized(sentence)) for sentence in sentences]
+        if any(matched):
+            for i, keys in enumerate(matched):
+                if keys:
+                    sentences[i] = _with_citation(sentences[i], sorted({cite(key) for key in sorted(keys)}))
+            indent = line[: len(line) - len(line.lstrip())]
+            line = indent + " ".join(sentences)
+        out.append(line)
     return "\n".join(out)
